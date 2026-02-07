@@ -1,5 +1,18 @@
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Bundled workflows ship with antfarm (in the repo's workflows/ directory)
+export function resolveBundledWorkflowsDir(): string {
+  // From dist/installer/paths.js -> ../../workflows
+  return path.resolve(__dirname, "..", "..", "workflows");
+}
+
+export function resolveBundledWorkflowDir(workflowId: string): string {
+  return path.join(resolveBundledWorkflowsDir(), workflowId);
+}
 
 export function resolveOpenClawStateDir(): string {
   const env = process.env.OPENCLAW_STATE_DIR?.trim();

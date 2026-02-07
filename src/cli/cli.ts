@@ -1,26 +1,25 @@
 #!/usr/bin/env node
 import { installWorkflow } from "../installer/install.js";
 import { uninstallAllWorkflows, uninstallWorkflow } from "../installer/uninstall.js";
-import { updateWorkflow } from "../installer/update.js";
 import { getWorkflowStatus } from "../installer/status.js";
 import { runWorkflow } from "../installer/run.js";
 import { getNextStep, completeStep } from "../installer/step-runner.js";
-import { runOrchestrator, orchestrateOnce, listSpawnQueue, removeFromSpawnQueue } from "../daemon/orchestrator.js";
+import { orchestrateOnce, listSpawnQueue, removeFromSpawnQueue } from "../daemon/orchestrator.js";
 import { getCronSetupInstructions } from "../installer/setup-cron.js";
 import { ensureOrchestratorCron } from "../installer/gateway-api.js";
-import { installAntfarm } from "../installer/install-antfarm.js";
+import { listBundledWorkflows } from "../installer/workflow-fetch.js";
 
 function printUsage() {
   process.stdout.write(
     [
-      "antfarm install <github-url>         Install Antfarm + default workflows + cron",
+      "antfarm install                      Install all bundled workflows + cron",
       "",
-      "antfarm workflow install <url>       Install a single workflow",
-      "antfarm workflow update <id> [<url>] Update a workflow",
-      "antfarm workflow uninstall <id>      Uninstall a workflow",
+      "antfarm workflow list                List available workflows",
+      "antfarm workflow install <name>      Install a workflow",
+      "antfarm workflow uninstall <name>    Uninstall a workflow",
       "antfarm workflow uninstall --all     Uninstall all workflows",
       "antfarm workflow status <task>       Check workflow run status",
-      "antfarm workflow run <id> <task>     Start a workflow run",
+      "antfarm workflow run <name> <task>   Start a workflow run",
       "antfarm workflow next <task>         Get next step info",
       "antfarm workflow complete <task> <success|fail> [output]",
       "",
@@ -36,14 +35,42 @@ async function main() {
   const args = process.argv.slice(2);
   const [group, action, target] = args;
   
-  // Handle single-word commands first (before length check)
-  if (group === "install" && args[1]) {
-    const result = await installAntfarm(args[1]);
-    const successCount = result.workflows.filter((w) => w.ok).length;
-    console.log(`\n✓ Antfarm installed`);
-    console.log(`  Cron: ${result.cronCreated ? "created" : result.cronExists ? "exists" : "failed"}`);
-    console.log(`  Workflows: ${successCount}/${result.workflows.length} installed`);
-    console.log(`\nStart a workflow with: antfarm workflow run <workflow-id> "your task"`);
+  // antfarm install - install all bundled workflows + cron
+  if (group === "install" && !args[1]) {
+    const workflows = await listBundledWorkflows();
+    if (workflows.length === 0) {
+      console.log("No bundled workflows found.");
+      return;
+    }
+    
+    console.log(`Installing ${workflows.length} workflow(s)...`);
+    const results: { id: string; ok: boolean; error?: string }[] = [];
+    
+    for (const workflowId of workflows) {
+      try {
+        await installWorkflow({ workflowId });
+        results.push({ id: workflowId, ok: true });
+        console.log(`  ✓ ${workflowId}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        results.push({ id: workflowId, ok: false, error: msg });
+        console.log(`  ✗ ${workflowId}: ${msg}`);
+      }
+    }
+    
+    // Set up orchestrator cron
+    console.log(`\nSetting up orchestrator cron...`);
+    const cronResult = await ensureOrchestratorCron();
+    if (cronResult.ok) {
+      console.log(cronResult.created ? "  ✓ Created cron job" : "  ✓ Cron already exists");
+    } else {
+      console.log(`  ✗ ${cronResult.error}`);
+      console.log(`  Run 'antfarm setup' for manual instructions.`);
+    }
+    
+    const successCount = results.filter((r) => r.ok).length;
+    console.log(`\n✓ Installed ${successCount}/${workflows.length} workflows`);
+    console.log(`\nStart a workflow with: antfarm workflow run <name> "your task"`);
     return;
   }
   
@@ -83,13 +110,26 @@ async function main() {
     printUsage();
     process.exit(1);
   }
-  if (!target && action !== "next" && action !== "complete") {
+  if (!target && action !== "list" && action !== "next" && action !== "complete") {
     printUsage();
     process.exit(1);
   }
 
+  if (action === "list") {
+    const workflows = await listBundledWorkflows();
+    if (workflows.length === 0) {
+      process.stdout.write("No workflows available.\n");
+    } else {
+      process.stdout.write("Available workflows:\n");
+      for (const w of workflows) {
+        process.stdout.write(`  ${w}\n`);
+      }
+    }
+    return;
+  }
+
   if (action === "install") {
-    const result = await installWorkflow({ source: target });
+    const result = await installWorkflow({ workflowId: target });
     process.stdout.write(`Installed workflow: ${result.workflowId}\n`);
     
     // Automatically set up the orchestrator cron
@@ -106,12 +146,6 @@ async function main() {
       process.stdout.write(`Could not auto-create cron: ${cronResult.error}\n`);
       process.stdout.write(`Run 'antfarm setup' for manual instructions.\n`);
     }
-    return;
-  }
-
-  if (action === "update") {
-    const source = args[3];
-    await updateWorkflow({ workflowId: target, source });
     return;
   }
 

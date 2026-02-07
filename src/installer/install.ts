@@ -78,8 +78,8 @@ async function writeWorkflowMetadata(params: {
   );
 }
 
-export async function installWorkflow(params: { source: string }): Promise<WorkflowInstallResult> {
-  const { workflowDir } = await fetchWorkflow(params.source);
+export async function installWorkflow(params: { workflowId: string }): Promise<WorkflowInstallResult> {
+  const { workflowDir } = await fetchWorkflow(params.workflowId);
   const workflow = await loadWorkflowSpec(workflowDir);
   const provisioned = await provisionAgents({ workflow, workflowDir });
 
@@ -94,7 +94,7 @@ export async function installWorkflow(params: { source: string }): Promise<Workf
   await writeWorkflowMetadata({
     workflowDir,
     workflowId: workflow.id,
-    source: params.source,
+    source: `bundled:${params.workflowId}`,
   });
 
   return { workflowId: workflow.id, workflowDir };
