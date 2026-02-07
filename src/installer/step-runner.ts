@@ -102,11 +102,14 @@ export async function completeStep(params: {
     run.stepResults.push(result);
 
     // Extract context from output (look for PLAN:, ACCEPTANCE:, SUMMARY:, etc.)
-    const contextMatches = params.output.matchAll(/^(\w+):\s*(.+?)(?=\n\w+:|$)/gms);
+    // Match KEY: followed by content until the next KEY: at start of line or end of string
+    const contextMatches = params.output.matchAll(/^([A-Z]+):\s*([\s\S]*?)(?=\n[A-Z]+:|$)/gm);
     for (const match of contextMatches) {
       const key = match[1].toLowerCase();
       const value = match[2].trim();
-      run.context[key] = value;
+      if (value) {
+        run.context[key] = value;
+      }
     }
 
     run.currentStepIndex++;
