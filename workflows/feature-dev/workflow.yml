@@ -10,12 +10,14 @@ description: |
   Then integration/E2E testing, PR creation, and code review.
 
 polling:
-  model: default
-  timeoutSeconds: 120
+  model: nvidia/microsoft/phi-3-mini-4k-instruct
+  timeoutSeconds: 240
 
 agents:
   - id: planner
     name: Planner
+    model: nvGLM4.7
+    pollingModel: nvPhi3Mini4k
     role: analysis
     description: Decomposes tasks into ordered user stories.
     workspace:
@@ -27,6 +29,8 @@ agents:
 
   - id: setup
     name: Setup
+    model: nvQwen3Code
+    pollingModel: nvPhi3Mini4k
     role: coding
     description: Prepares environment, creates branch, establishes baseline.
     workspace:
@@ -38,6 +42,8 @@ agents:
 
   - id: developer
     name: Developer
+    model: nvQwen3Code
+    pollingModel: nvPhi3Mini4k
     role: coding
     description: Implements features, writes tests, creates PRs.
     workspace:
@@ -49,6 +55,8 @@ agents:
 
   - id: verifier
     name: Verifier
+    model: nvGLM4.7
+    pollingModel: nvPhi3Mini4k
     role: verification
     description: Quick sanity check - did developer actually do the work?
     workspace:
@@ -62,6 +70,8 @@ agents:
 
   - id: tester
     name: Tester
+    model: nvGLM4.7
+    pollingModel: nvPhi3Mini4k
     role: testing
     description: Integration and E2E testing after all stories are implemented.
     workspace:
@@ -73,6 +83,8 @@ agents:
 
   - id: reviewer
     name: Reviewer
+    model: nvGLM4.7
+    pollingModel: nvPhi3Mini4k
     role: analysis
     description: Reviews PRs, requests changes or approves.
     workspace:
