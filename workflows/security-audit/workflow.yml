@@ -9,12 +9,14 @@ description: |
   Verifier confirms each fix. Tester runs final integration validation. PR agent creates the pull request.
 
 polling:
-  model: default
-  timeoutSeconds: 120
+  model: nvidia/microsoft/phi-3-mini-4k-instruct
+  timeoutSeconds: 240
 
 agents:
   - id: scanner
     name: Scanner
+    model: nvQwen3Code
+    pollingModel: nvPhi3Mini4k
     role: scanning
     description: Explores codebase and runs comprehensive security analysis.
     workspace:
@@ -26,6 +28,8 @@ agents:
 
   - id: prioritizer
     name: Prioritizer
+    model: nvGLM4.7
+    pollingModel: nvPhi3Mini4k
     role: analysis
     description: Deduplicates, ranks, and groups findings into a fix plan.
     workspace:
@@ -37,6 +41,8 @@ agents:
 
   - id: setup
     name: Setup
+    model: nvQwen3Code
+    pollingModel: nvPhi3Mini4k
     role: coding
     description: Creates security branch and establishes baseline.
     workspace:
@@ -48,6 +54,8 @@ agents:
 
   - id: fixer
     name: Fixer
+    model: nvQwen3Code
+    pollingModel: nvPhi3Mini4k
     role: coding
     description: Implements security fixes one at a time with regression tests.
     workspace:
@@ -59,6 +67,8 @@ agents:
 
   - id: verifier
     name: Verifier
+    model: nvGLM4.7
+    pollingModel: nvPhi3Mini4k
     role: verification
     description: Verifies each fix is correct and the vulnerability is patched.
     workspace:
@@ -70,6 +80,8 @@ agents:
 
   - id: tester
     name: Tester
+    model: nvGLM4.7
+    pollingModel: nvPhi3Mini4k
     role: testing
     description: Final integration testing and audit re-run after all fixes.
     workspace:
@@ -81,6 +93,8 @@ agents:
 
   - id: pr
     name: PR Creator
+    model: nvGLM4.7
+    pollingModel: nvPhi3Mini4k
     role: pr
     description: Creates a pull request summarizing the security audit and fixes.
     workspace:
