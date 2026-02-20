@@ -13,6 +13,11 @@ Antfarm is being enhanced with a daemon that replaces the LLM-polling cron syste
 
 The daemon uses a `daemon_active_sessions` table to track currently active agent sessions.
 
+Core components:
+- `spawner.ts`: Implements agent session spawning logic with lightweight peek/claim pattern
+- `daemon.ts`: Main daemon implementation with polling loop and process management
+- `daemonctl.ts`: Daemon control interface (to be implemented)
+
 ## Installing Antfarm
 
 **Prerequisites:** Node.js >= 22, OpenClaw v2026.2.9+, `gh` CLI (for PR steps).
