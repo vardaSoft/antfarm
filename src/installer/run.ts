@@ -10,6 +10,7 @@ export async function runWorkflow(params: {
   workflowId: string;
   taskTitle: string;
   notifyUrl?: string;
+  scheduler?: "cron" | "daemon"; // Added scheduler option
 }): Promise<{ id: string; runNumber: number; workflowId: string; task: string; status: string }> {
   const workflowDir = resolveWorkflowDir(params.workflowId);
   const workflow = await loadWorkflowSpec(workflowDir);
@@ -52,15 +53,18 @@ export async function runWorkflow(params: {
     throw err;
   }
 
-  // Start crons for this workflow (no-op if already running from another run)
-  try {
-    await ensureWorkflowCrons(workflow);
-  } catch (err) {
-    // Roll back the run since it can't advance without crons
-    const db2 = getDb();
-    db2.prepare("UPDATE runs SET status = 'failed', updated_at = ? WHERE id = ?").run(new Date().toISOString(), runId);
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Cannot start workflow run: cron setup failed. ${message}`);
+  // Start crons for this workflow if using cron scheduler (no-op if already running from another run)
+  // If using daemon scheduler, skip cron setup as the daemon will handle polling
+  if (params.scheduler !== "daemon") {
+    try {
+      await ensureWorkflowCrons(workflow);
+    } catch (err) {
+      // Roll back the run since it can't advance without crons
+      const db2 = getDb();
+      db2.prepare("UPDATE runs SET status = 'failed', updated_at = ? WHERE id = ?").run(new Date().toISOString(), runId);
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`Cannot start workflow run: cron setup failed. ${message}`);
+    }
   }
 
   emitEvent({ ts: new Date().toISOString(), event: "run.started", runId, workflowId: workflow.id });
