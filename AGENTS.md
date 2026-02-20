@@ -2,6 +2,17 @@
 
 Antfarm provisions multi-agent workflows for OpenClaw. It installs workflow agent workspaces, wires agents into the OpenClaw config, and keeps a run record per task.
 
+## Event-Driven Spawner Daemon
+
+Antfarm is being enhanced with a daemon that replaces the LLM-polling cron system with an event-driven approach:
+
+- Lightweight Node.js daemon that polls SQLite DB directly every 30 seconds (zero LLM cost)
+- Checks for pending steps per agent and only spawns OpenClaw agent sessions when there's actual work
+- Tracks active sessions to avoid double-spawning agents for the same work
+- Runs abandoned step cleanup
+
+The daemon uses a `daemon_active_sessions` table to track currently active agent sessions.
+
 ## Installing Antfarm
 
 **Prerequisites:** Node.js >= 22, OpenClaw v2026.2.9+, `gh` CLI (for PR steps).
