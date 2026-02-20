@@ -394,7 +394,7 @@ export function peekStep(agentId: string): PeekResult {
   const row = db.prepare(
     `SELECT COUNT(*) as cnt FROM steps s
      JOIN runs r ON r.id = s.run_id
-     WHERE s.agent_id = ? AND s.status IN ('pending', 'waiting')
+     WHERE s.agent_id = ? AND s.status = 'pending'
        AND r.status = 'running'`
   ).get(agentId) as { cnt: number };
   return row.cnt > 0 ? "HAS_WORK" : "NO_WORK";
