@@ -9,12 +9,14 @@ description: |
   PR agent creates the pull request.
 
 polling:
-  model: default
-  timeoutSeconds: 120
+  model: nvidia/microsoft/phi-3-mini-4k-instruct
+  timeoutSeconds: 240
 
 agents:
   - id: triager
     name: Triager
+    model: nvGLM4.7
+    pollingModel: nvPhi3Mini4k
     role: analysis
     description: Analyzes bug reports, reproduces issues, classifies severity.
     workspace:
@@ -26,6 +28,8 @@ agents:
 
   - id: investigator
     name: Investigator
+    model: nvGLM4.7
+    pollingModel: nvPhi3Mini4k
     role: analysis
     description: Traces bugs to root cause and proposes fix approach.
     workspace:
@@ -37,6 +41,8 @@ agents:
 
   - id: setup
     name: Setup
+    model: nvQwen3Code
+    pollingModel: nvPhi3Mini4k
     role: coding
     description: Creates bugfix branch and establishes baseline.
     workspace:
@@ -48,6 +54,8 @@ agents:
 
   - id: fixer
     name: Fixer
+    model: nvQwen3Code
+    pollingModel: nvPhi3Mini4k
     role: coding
     description: Implements the fix and writes regression tests.
     workspace:
@@ -59,6 +67,8 @@ agents:
 
   - id: verifier
     name: Verifier
+    model: nvGLM4.7
+    pollingModel: nvPhi3Mini4k
     role: verification
     description: Verifies the fix and regression test correctness.
     workspace:
@@ -70,6 +80,8 @@ agents:
 
   - id: pr
     name: PR Creator
+    model: nvGLM4.7
+    pollingModel: nvPhi3Mini4k
     role: pr
     description: Creates a pull request with bug fix details.
     workspace:
