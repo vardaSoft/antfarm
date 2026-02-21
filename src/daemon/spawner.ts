@@ -1,5 +1,6 @@
 import { getDb } from "../db.js";
-import { peekStep, claimStep } from "../installer/step-ops.js";
+import { peekStep, claimStep, claimStory } from "../installer/step-ops.js";
+import { emitEvent } from "../installer/events.js";
 import type { WorkflowSpec } from "../installer/types.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -32,7 +33,14 @@ async function getGatewayConfig(): Promise<GatewayConfig | null> {
 
 interface SpawnResult {
   spawned: boolean;
+  sessionId?: string;
   stepId?: string;
+  runId?: string;
+  storyId?: string;  // ADDED
+  spawnedBy?: 'daemon' | 'cron';
+  reason?: string;
+  error?: string;
+  rollback?: boolean;
 }
 
 interface ActiveSession {
@@ -42,56 +50,48 @@ interface ActiveSession {
   spawned_at: string;
 }
 
-/**
- * Lightweight check: does this agent have any pending/waiting steps in active runs?
- * Unlike claimStep(), this runs a single cheap COUNT query — no cleanup, no context resolution.
- * Returns "HAS_WORK" if any pending/waiting steps exist, "NO_WORK" otherwise.
- */
-export async function peekAndSpawn(agentId: string, workflow: WorkflowSpec): Promise<SpawnResult> {
-  // First check if there's any work using the lightweight peek operation
+export async function peekAndSpawn(
+  agentId: string, 
+  workflow: WorkflowSpec,
+  source: 'daemon' | 'cron' = 'daemon'
+): Promise<SpawnResult> {
+  const db = getDb();
+
+  // Check for pending single steps
   const peekResult = peekStep(agentId);
   
   if (peekResult === "NO_WORK") {
-    // No work available, return without spawning any sessions
-    return { spawned: false };
+    // Check for loop steps with pending stories
+    const loopStep = db.prepare(
+      "SELECT * FROM steps WHERE agent_id = ? AND type = 'loop' AND status = 'running' LIMIT 1"
+    ).get(agentId) as any;
+
+    if (loopStep) {
+      // Claim a story for the running loop step
+      const storyClaim = claimStory(agentId, loopStep.id);
+      
+      if (storyClaim && storyClaim.found && storyClaim.storyId) {
+        return await spawnForClaimed(agentId, workflow, storyClaim, loopStep.id, source);
+      }
+    }
+
+    return { spawned: false, reason: "no_work" };
   }
-  
-  // Check if there's already an active session for this agent
-  const db = getDb();
-  const existingSession = db.prepare(
-    "SELECT agent_id FROM daemon_active_sessions WHERE agent_id = ?"
-  ).get(agentId) as ActiveSession | undefined;
-  
-  if (existingSession) {
-    console.warn(`Skipping spawn for ${agentId} - agent already has active session`);
-    return { spawned: false };
-  }
-  
-  // Work is available and no active session exists, claim the step to get the actual work
+
+  // Single step flow
   const claimResult = claimStep(agentId);
   
   if (!claimResult.found) {
-    // No work found after claiming (race condition), return without spawning
-    return { spawned: false };
+    return { spawned: false, reason: "race_condition" };
   }
-  
-  // Work was successfully claimed, spawn an agent session
+
   if (!claimResult.stepId || !claimResult.runId || !claimResult.resolvedInput) {
     throw new Error("Claimed step missing required fields");
   }
   
-  // Get the agent configuration to determine the model and timeout
-  const agent = workflow.agents.find(a => a.id === agentId.split('_')[1]);
-  const model = agent?.model ?? "default";
+  const { stepId, runId, resolvedInput } = claimResult;
   
-  // Calculate timeout from agent.timeoutSeconds, default to 3600s (1 hour)
-  const timeoutSeconds = agent?.timeoutSeconds ?? 3600;
-  
-  // Spawn the agent session
-  await spawnAgentSession(agentId, claimResult.stepId, claimResult.runId, claimResult.resolvedInput, model, timeoutSeconds);
-  
-  // Return that we spawned a session
-  return { spawned: true, stepId: claimResult.stepId };
+  return await spawnForClaimed(agentId, workflow, claimResult, stepId, source);
 }
 
 /**
@@ -105,7 +105,7 @@ export async function spawnAgentSession(
   input: string, 
   model: string,
   timeoutSeconds: number
-): Promise<void> {
+): Promise<{ sessionId?: string }> {
   // Try Gateway API first
   try {
     const gateway = await getGatewayConfig();
@@ -131,7 +131,7 @@ export async function spawnAgentSession(
       if (response.ok) {
         const result = await response.json();
         console.log(`Spawned agent session via Gateway API for ${agentId}`);
-        return;
+        return { sessionId: result.sessionId || result.id };
       } else {
         console.warn(`Gateway API returned status ${response.status}, falling back to CLI`);
       }
@@ -141,7 +141,7 @@ export async function spawnAgentSession(
   }
 
   // Fallback to CLI
-  await spawnAgentSessionCLI(agentId, stepId, runId, input, model, timeoutSeconds);
+  return await spawnAgentSessionCLI(agentId, stepId, runId, input, model, timeoutSeconds);
 }
 
 /**
@@ -155,16 +155,7 @@ async function spawnAgentSessionCLI(
   input: string, 
   model: string,
   timeoutSeconds: number
-): Promise<void> {
-  // Record the active session in the database before spawning
-  const db = getDb();
-  const now = new Date().toISOString();
-  
-  // Insert into daemon_active_sessions table
-  db.prepare(
-    "INSERT INTO daemon_active_sessions (agent_id, step_id, run_id, spawned_at) VALUES (?, ?, ?, ?)"
-  ).run(agentId, stepId, runId, now);
-  
+): Promise<{ sessionId?: string }> {
   // Build the work prompt similar to what's used in agent-cron.ts
   const cli = path.join(os.homedir(), ".openclaw", "antfarm", "bin", "antfarm");
   const workPrompt = `You are an Antfarm workflow agent. Execute the pending work below.
@@ -226,36 +217,31 @@ ${input}`;
     child.stdin?.write(workPrompt);
     child.stdin?.end();
     
-    // Wait for the process to complete
-    await new Promise<void>((resolve, reject) => {
+    // Capture stdout to extract session ID
+    let stdoutData = '';
+    child.stdout?.on('data', (data) => {
+      stdoutData += data.toString();
+    });
+    
+    // Wait for the process to complete and get session ID
+    const sessionId = await new Promise<string | null>((resolve, reject) => {
       child.on('close', (code) => {
-        // Remove the session record when the process completes (regardless of success/failure)
-        db.prepare(
-          "DELETE FROM daemon_active_sessions WHERE agent_id = ? AND step_id = ?"
-        ).run(agentId, stepId);
-        
         if (code === 0) {
-          resolve();
+          // Try to extract session ID from stdout
+          const match = stdoutData.match(/session_id["']?\s*:\s*["']?([a-zA-Z0-9-]+)/);
+          resolve(match ? match[1] : null);
         } else {
           reject(new Error(`OpenClaw session spawn failed with code ${code}`));
         }
       });
       
       child.on('error', (err) => {
-        // Remove the session record if there was an error
-        db.prepare(
-          "DELETE FROM daemon_active_sessions WHERE agent_id = ? AND step_id = ?"
-        ).run(agentId, stepId);
-        
         reject(err);
       });
     });
-  } catch (error) {
-    // Remove the session record if spawning failed
-    db.prepare(
-      "DELETE FROM daemon_active_sessions WHERE agent_id = ? AND step_id = ?"
-    ).run(agentId, stepId);
     
+    return { sessionId: sessionId || undefined };
+  } catch (error) {
     throw error;
   }
 }
@@ -321,19 +307,142 @@ export function cleanupStaleSessions(): void {
   
   // Find stale sessions
   const staleSessions = db.prepare(`
-    SELECT agent_id, step_id 
+    SELECT agent_id, step_id, story_id
     FROM daemon_active_sessions 
     WHERE spawned_at < ?
-  `).all(cutoffTime) as { agent_id: string; step_id: string }[];
+  `).all(cutoffTime) as { agent_id: string; step_id: string; story_id: string | null }[];
   
   // Remove stale sessions from the active sessions table
   for (const session of staleSessions) {
     db.prepare(
-      "DELETE FROM daemon_active_sessions WHERE agent_id = ? AND step_id = ?"
-    ).run(session.agent_id, session.step_id);
+      "DELETE FROM daemon_active_sessions WHERE agent_id = ? AND step_id = ? AND COALESCE(story_id, '') = COALESCE(?, '')"
+    ).run(session.agent_id, session.step_id, session.story_id || '');
   }
   
   if (staleSessions.length > 0) {
     console.log(`Cleaned up ${staleSessions.length} stale sessions`);
   }
+}
+
+/**
+ * Spawn agent session for a claimed step or story.
+ * Handles cleanup, error rollback, and session tracking.
+ */
+async function spawnForClaimed(
+  agentId: string,
+  workflow: WorkflowSpec,
+  claim: { found: boolean; stepId?: string; runId?: string; resolvedInput?: string; storyId?: string },
+  stepId: string,
+  source: 'daemon' | 'cron'
+): Promise<SpawnResult> {
+  const db = getDb();
+  const agent = workflow.agents.find((a: any) => `${workflow.id}_${a.id}` === agentId);
+  if (!agent) throw new Error(`Agent not found: ${agentId}`);
+
+  try {
+    // Get the agent configuration to determine the model and timeout
+    const model = agent.model || "default";
+    const timeoutSeconds = agent.timeoutSeconds || 1800;
+
+    // Spawn the session
+    const result = await spawnAgentSession(agentId, stepId, claim.runId!, claim.resolvedInput!, model, timeoutSeconds);
+    
+    if (!result.sessionId) {
+      throw new Error(`Failed to spawn session: ${JSON.stringify(result)}`);
+    }
+
+    // Update step/story to 'running' AFTER successful spawn
+    if (claim.storyId) {
+      // Story: claiming → running
+      db.prepare(
+        "UPDATE stories SET status = 'running', updated_at = datetime('now') WHERE id = ?"
+      ).run(claim.storyId);
+
+      // Emit story.started event (after spawn success)
+      const step = db.prepare("SELECT step_id, run_id FROM steps WHERE id = ?").get(stepId) as any;
+      const story = db.prepare("SELECT story_id, title FROM stories WHERE id = ?").get(claim.storyId) as any;
+      const wfId = getWorkflowId(step.run_id);
+      
+      emitEvent({ 
+        ts: new Date().toISOString(), 
+        event: "story.started",
+        runId: step.run_id,
+        workflowId: wfId,
+        stepId: step.step_id,
+        agentId,
+        storyId: story.story_id,
+        storyTitle: story.title
+      });
+    } else {
+      // Single step: claiming → running
+      db.prepare(
+        "UPDATE steps SET status = 'running', updated_at = datetime('now') WHERE id = ?"
+      ).run(stepId);
+
+      // Emit step.running event (after spawn success)
+      const step = db.prepare("SELECT step_id, run_id FROM steps WHERE id = ?").get(stepId) as any;
+      const wfId = getWorkflowId(step.run_id);
+      
+      emitEvent({ 
+        ts: new Date().toISOString(), 
+        event: "step.running",
+        runId: step.run_id,
+        workflowId: wfId,
+        stepId: step.step_id,
+        agentId,
+        sessionId: result.sessionId
+      });
+    }
+
+    // Record session in daemon_active_sessions
+    db.prepare(
+      `INSERT INTO daemon_active_sessions (agent_id, step_id, run_id, story_id, spawned_at, spawned_by, session_id)
+       VALUES (?, ?, ?, ?, datetime('now'), ?, ?)`
+    ).run(agentId, stepId, claim.runId!, claim.storyId || null, source, result.sessionId);
+
+    return { 
+      spawned: true, 
+      sessionId: result.sessionId,
+      stepId: stepId,
+      runId: claim.runId!,
+      storyId: claim.storyId || undefined,
+      spawnedBy: source
+    };
+
+  } catch (error) {
+    // Rollback on spawn failure
+    console.error(`Failed to spawn session for ${agentId}: ${error}`);
+    
+    if (claim.storyId) {
+      // Revert story to 'pending'
+      db.prepare(
+        "UPDATE stories SET status = 'pending', updated_at = datetime('now') WHERE id = ? AND status = 'claiming'"
+      ).run(claim.storyId);
+      
+      // Clear step's current_story_id
+      db.prepare(
+        "UPDATE steps SET current_story_id = NULL WHERE id = ?"
+      ).run(stepId);
+    } else {
+      // Revert step to 'pending'
+      db.prepare(
+        "UPDATE steps SET status = 'pending', updated_at = datetime('now') WHERE id = ? AND status = 'claiming'"
+      ).run(stepId);
+    }
+
+    return { 
+      spawned: false, 
+      error: error instanceof Error ? error.message : String(error),
+      rollback: true
+    };
+  }
+}
+
+// Helper function to get workflow ID (needed for event emission)
+function getWorkflowId(runId: string): string | undefined {
+  try {
+    const db = getDb();
+    const row = db.prepare("SELECT workflow_id FROM runs WHERE id = ?").get(runId) as { workflow_id: string } | undefined;
+    return row?.workflow_id;
+  } catch { return undefined; }
 }

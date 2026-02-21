@@ -24,6 +24,7 @@ export interface AntfarmEvent {
   storyId?: string;
   storyTitle?: string;
   detail?: string;
+  sessionId?: string;
 }
 
 export function emitEvent(evt: AntfarmEvent): void {
