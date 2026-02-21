@@ -35,7 +35,18 @@ export async function peekAndSpawn(agentId: string, workflow: WorkflowSpec): Pro
     return { spawned: false };
   }
   
-  // Work is available, claim the step to get the actual work
+  // Check if there's already an active session for this agent
+  const db = getDb();
+  const existingSession = db.prepare(
+    "SELECT agent_id FROM daemon_active_sessions WHERE agent_id = ?"
+  ).get(agentId) as ActiveSession | undefined;
+  
+  if (existingSession) {
+    console.warn(`Skipping spawn for ${agentId} - agent already has active session`);
+    return { spawned: false };
+  }
+  
+  // Work is available and no active session exists, claim the step to get the actual work
   const claimResult = claimStep(agentId);
   
   if (!claimResult.found) {
@@ -76,7 +87,7 @@ export async function spawnAgentSession(
   
   // Insert into daemon_active_sessions table
   db.prepare(
-    "INSERT OR REPLACE INTO daemon_active_sessions (agent_id, step_id, run_id, spawned_at) VALUES (?, ?, ?, ?)"
+    "INSERT INTO daemon_active_sessions (agent_id, step_id, run_id, spawned_at) VALUES (?, ?, ?, ?)"
   ).run(agentId, stepId, runId, now);
   
   // Build the work prompt similar to what's used in agent-cron.ts
@@ -143,6 +154,11 @@ ${input}`;
     // Wait for the process to complete
     await new Promise<void>((resolve, reject) => {
       child.on('close', (code) => {
+        // Remove the session record when the process completes (regardless of success/failure)
+        db.prepare(
+          "DELETE FROM daemon_active_sessions WHERE agent_id = ? AND step_id = ?"
+        ).run(agentId, stepId);
+        
         if (code === 0) {
           resolve();
         } else {
@@ -151,6 +167,11 @@ ${input}`;
       });
       
       child.on('error', (err) => {
+        // Remove the session record if there was an error
+        db.prepare(
+          "DELETE FROM daemon_active_sessions WHERE agent_id = ? AND step_id = ?"
+        ).run(agentId, stepId);
+        
         reject(err);
       });
     });
@@ -210,5 +231,34 @@ export function cleanupCompletedSessions(): void {
     db.prepare(
       "DELETE FROM daemon_active_sessions WHERE agent_id = ? AND step_id = ?"
     ).run(session.agent_id, session.step_id);
+  }
+}
+
+/**
+ * Clean up stale sessions from the daemon_active_sessions table.
+ * Removes entries older than 45 minutes (30 min timeout + 15 min buffer).
+ */
+export function cleanupStaleSessions(): void {
+  const db = getDb();
+  
+  // Calculate the cutoff time (45 minutes ago)
+  const cutoffTime = new Date(Date.now() - 45 * 60 * 1000).toISOString();
+  
+  // Find stale sessions
+  const staleSessions = db.prepare(`
+    SELECT agent_id, step_id 
+    FROM daemon_active_sessions 
+    WHERE spawned_at < ?
+  `).all(cutoffTime) as { agent_id: string; step_id: string }[];
+  
+  // Remove stale sessions from the active sessions table
+  for (const session of staleSessions) {
+    db.prepare(
+      "DELETE FROM daemon_active_sessions WHERE agent_id = ? AND step_id = ?"
+    ).run(session.agent_id, session.step_id);
+  }
+  
+  if (staleSessions.length > 0) {
+    console.log(`Cleaned up ${staleSessions.length} stale sessions`);
   }
 }

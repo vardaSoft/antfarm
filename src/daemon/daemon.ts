@@ -11,6 +11,7 @@ import * as os from "node:os";
 // Global variables to track daemon state
 let daemonInterval: NodeJS.Timeout | null = null;
 let cleanupInterval: NodeJS.Timeout | null = null;
+let staleCleanupInterval: NodeJS.Timeout | null = null;
 let isShuttingDown = false;
 
 // PID file path
@@ -52,13 +53,35 @@ export async function startDaemon(intervalMs: number = 30000, workflowIds?: stri
     }
   }, 5 * 60 * 1000); // 5 minutes
   
-  // Run the first cleanup immediately
+  // Start the stale sessions cleanup loop (every 10 minutes)
+  staleCleanupInterval = setInterval(() => {
+    if (isShuttingDown) return;
+    try {
+      console.log("Running stale sessions cleanup");
+      import("./spawner.js").then(spawner => {
+        spawner.cleanupStaleSessions();
+      });
+    } catch (error) {
+      console.error("Error during stale sessions cleanup:", error);
+    }
+  }, 10 * 60 * 1000); // 10 minutes
+  
+  // Run the first cleanups immediately
   setImmediate(() => {
     try {
       console.log("Running initial abandoned steps cleanup");
       cleanupAbandonedSteps();
     } catch (error) {
       console.error("Error during initial abandoned steps cleanup:", error);
+    }
+    
+    try {
+      console.log("Running initial stale sessions cleanup");
+      import("./spawner.js").then(spawner => {
+        spawner.cleanupStaleSessions();
+      });
+    } catch (error) {
+      console.error("Error during initial stale sessions cleanup:", error);
     }
   });
   
@@ -144,6 +167,11 @@ function setupShutdownHandlers(): void {
       cleanupInterval = null;
     }
     
+    if (staleCleanupInterval) {
+      clearInterval(staleCleanupInterval);
+      staleCleanupInterval = null;
+    }
+    
     // Remove PID file
     try {
       if (fs.existsSync(PID_FILE)) {
@@ -174,6 +202,11 @@ export function stopDaemon(): void {
   if (cleanupInterval) {
     clearInterval(cleanupInterval);
     cleanupInterval = null;
+  }
+  
+  if (staleCleanupInterval) {
+    clearInterval(staleCleanupInterval);
+    staleCleanupInterval = null;
   }
   
   // Remove PID file
