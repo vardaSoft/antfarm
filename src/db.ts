@@ -110,6 +110,10 @@ function migrate(db: DatabaseSync): void {
       ) WHERE run_number IS NULL
     `);
   }
+  
+  if (!runColNames.has("scheduler")) {
+    db.exec("ALTER TABLE runs ADD COLUMN scheduler TEXT");
+  }
 }
 
 export function nextRunNumber(): number {

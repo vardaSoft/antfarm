@@ -27,10 +27,11 @@ export async function runWorkflow(params: {
   db.exec("BEGIN");
   try {
     const notifyUrl = params.notifyUrl ?? workflow.notifications?.url ?? null;
+    const scheduler = params.scheduler ?? "cron"; // Default to cron scheduler
     const insertRun = db.prepare(
-      "INSERT INTO runs (id, run_number, workflow_id, task, status, context, notify_url, created_at, updated_at) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)"
+      "INSERT INTO runs (id, run_number, workflow_id, task, status, context, notify_url, scheduler, created_at, updated_at) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)"
     );
-    insertRun.run(runId, runNumber, workflow.id, params.taskTitle, JSON.stringify(initialContext), notifyUrl, now, now);
+    insertRun.run(runId, runNumber, workflow.id, params.taskTitle, JSON.stringify(initialContext), notifyUrl, scheduler, now, now);
 
     const insertStep = db.prepare(
       "INSERT INTO steps (id, run_id, step_id, agent_id, step_index, input_template, expects, status, max_retries, type, loop_config, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -53,9 +54,21 @@ export async function runWorkflow(params: {
     throw err;
   }
 
-  // Start crons for this workflow if using cron scheduler (no-op if already running from another run)
-  // If using daemon scheduler, skip cron setup as the daemon will handle polling
-  if (params.scheduler !== "daemon") {
+  // Handle different schedulers
+  if (params.scheduler === "daemon") {
+    // For daemon scheduler, start the spawner daemon instead of cron jobs
+    try {
+      const { startDaemon } = await import("../daemon/daemonctl.js");
+      await startDaemon();
+    } catch (err) {
+      // Roll back the run since it can't advance without the daemon
+      const db2 = getDb();
+      db2.prepare("UPDATE runs SET status = 'failed', updated_at = ? WHERE id = ?").run(new Date().toISOString(), runId);
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`Cannot start workflow run: daemon startup failed. ${message}`);
+    }
+  } else {
+    // Default to cron scheduler (existing behavior)
     try {
       await ensureWorkflowCrons(workflow);
     } catch (err) {
@@ -69,7 +82,7 @@ export async function runWorkflow(params: {
 
   emitEvent({ ts: new Date().toISOString(), event: "run.started", runId, workflowId: workflow.id });
 
-  logger.info(`Run started: "${params.taskTitle}"`, {
+  logger.info(`Run started: "${params.taskTitle}" (scheduler: ${params.scheduler ?? "cron"})`, {
     workflowId: workflow.id,
     runId,
     stepId: workflow.steps[0]?.id,
