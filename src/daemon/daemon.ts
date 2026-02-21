@@ -226,3 +226,27 @@ export function stopDaemon(): void {
   
   console.log("Daemon stopped");
 }
+
+// Entry point for running daemon.ts as a standalone script
+if (import.meta.url === `file://${process.argv[1]}`) {
+  // Parse command-line arguments
+  const args = process.argv.slice(2);
+  let intervalMs = 30000; // default 30 seconds
+  let workflowIds: string[] | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--interval" && args[i + 1]) {
+      intervalMs = parseInt(args[i + 1], 10) || 30000;
+      i++;
+    } else if (args[i] === "--workflows" && args[i + 1]) {
+      workflowIds = args[i + 1].split(",");
+      i++;
+    }
+  }
+
+  // Start the daemon
+  startDaemon(intervalMs, workflowIds).catch((err) => {
+    console.error("Failed to start daemon:", err);
+    process.exit(1);
+  });
+}
