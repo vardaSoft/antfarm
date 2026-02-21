@@ -9,6 +9,27 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
+interface GatewayConfig {
+  url: string;
+  secret?: string;
+}
+
+async function getGatewayConfig(): Promise<GatewayConfig | null> {
+  try {
+    const configPath = path.join(os.homedir(), ".openclaw", "openclaw.json");
+    const config = JSON.parse(await fs.promises.readFile(configPath, "utf-8"));
+    if (config.gateway?.url) {
+      return {
+        url: config.gateway.url,
+        secret: config.gateway.secret
+      };
+    }
+  } catch {
+    // Config not found or invalid, fall back to CLI
+  }
+  return null;
+}
+
 interface SpawnResult {
   spawned: boolean;
   stepId?: string;
@@ -59,12 +80,15 @@ export async function peekAndSpawn(agentId: string, workflow: WorkflowSpec): Pro
     throw new Error("Claimed step missing required fields");
   }
   
-  // Get the agent configuration to determine the model
+  // Get the agent configuration to determine the model and timeout
   const agent = workflow.agents.find(a => a.id === agentId.split('_')[1]);
   const model = agent?.model ?? "default";
   
+  // Calculate timeout from agent.timeoutSeconds, default to 3600s (1 hour)
+  const timeoutSeconds = agent?.timeoutSeconds ?? 3600;
+  
   // Spawn the agent session
-  await spawnAgentSession(agentId, claimResult.stepId, claimResult.runId, claimResult.resolvedInput, model);
+  await spawnAgentSession(agentId, claimResult.stepId, claimResult.runId, claimResult.resolvedInput, model, timeoutSeconds);
   
   // Return that we spawned a session
   return { spawned: true, stepId: claimResult.stepId };
@@ -79,7 +103,58 @@ export async function spawnAgentSession(
   stepId: string, 
   runId: string, 
   input: string, 
-  model: string
+  model: string,
+  timeoutSeconds: number
+): Promise<void> {
+  // Try Gateway API first
+  try {
+    const gateway = await getGatewayConfig();
+    if (gateway) {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (gateway.secret) headers['Authorization'] = `Bearer ${gateway.secret}`;
+
+      const response = await fetch(`${gateway.url}/api/tools/call`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          tool: 'sessions_spawn',
+          args: {
+            task: input,
+            agent_id: agentId,
+            model: model,
+            thinking: 'high',
+            timeout_ms: timeoutSeconds * 1000
+          }
+        })
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        console.log(`Spawned agent session via Gateway API for ${agentId}`);
+        return;
+      } else {
+        console.warn(`Gateway API returned status ${response.status}, falling back to CLI`);
+      }
+    }
+  } catch (err) {
+    console.warn('Gateway API failed, falling back to CLI:', err);
+  }
+
+  // Fallback to CLI
+  await spawnAgentSessionCLI(agentId, stepId, runId, input, model, timeoutSeconds);
+}
+
+/**
+ * Spawn an OpenClaw agent session via CLI with the specified parameters.
+ * Records the session in the daemon_active_sessions table before spawning.
+ */
+async function spawnAgentSessionCLI(
+  agentId: string, 
+  stepId: string, 
+  runId: string, 
+  input: string, 
+  model: string,
+  timeoutSeconds: number
 ): Promise<void> {
   // Record the active session in the database before spawning
   const db = getDb();
@@ -137,7 +212,7 @@ ${input}`;
     "--agent", agentId,
     "--model", model,
     "--think", "high",
-    "--timeout", "1800", // 30 minutes default timeout
+    "--timeout", String(timeoutSeconds),
   ];
   
   try {
@@ -236,13 +311,13 @@ export function cleanupCompletedSessions(): void {
 
 /**
  * Clean up stale sessions from the daemon_active_sessions table.
- * Removes entries older than 45 minutes (30 min timeout + 15 min buffer).
+ * Removes entries older than 15 minutes.
  */
 export function cleanupStaleSessions(): void {
   const db = getDb();
   
-  // Calculate the cutoff time (45 minutes ago)
-  const cutoffTime = new Date(Date.now() - 45 * 60 * 1000).toISOString();
+  // Calculate the cutoff time (15 minutes ago)
+  const cutoffTime = new Date(Date.now() - 15 * 60 * 1000).toISOString();
   
   // Find stale sessions
   const staleSessions = db.prepare(`

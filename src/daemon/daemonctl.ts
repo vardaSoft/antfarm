@@ -50,7 +50,7 @@ export async function startDaemon(options?: {
   const out = fs.openSync(logFile, "a");
   const err = fs.openSync(logFile, "a");
 
-  const daemonScript = path.resolve(__dirname, "daemon.js");
+  const daemonScript = path.resolve(__dirname, "..", "..", "dist", "daemon", "daemon.js");
   
   // Prepare arguments
   const args: string[] = [];

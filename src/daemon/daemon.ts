@@ -3,6 +3,7 @@ import { peekAndSpawn } from "./spawner.js";
 import { cleanupAbandonedSteps } from "../installer/step-ops.js";
 import { loadWorkflowSpec } from "../installer/workflow-spec.js";
 import { resolveWorkflowDir } from "../installer/paths.js";
+import { getCachedWorkflow, getCacheMetrics } from "./cache.js";
 import type { WorkflowSpec } from "../installer/types.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -48,6 +49,10 @@ export async function startDaemon(intervalMs: number = 30000, workflowIds?: stri
     try {
       console.log("Running abandoned steps cleanup");
       cleanupAbandonedSteps();
+      
+      // Log cache metrics
+      const metrics = getCacheMetrics();
+      console.log(`Workflow cache metrics: ${metrics.hits} hits, ${metrics.misses} misses, ${Math.round(metrics.hitRate * 100)}% hit rate, ${metrics.size} entries`);
     } catch (error) {
       console.error("Error during abandoned steps cleanup:", error);
     }
@@ -95,10 +100,10 @@ async function runDaemonLoop(workflowIds?: string[]): Promise<void> {
   try {
     const db = getDb();
     
-    // Get all active runs
+    // Get all active runs with scheduler = 'daemon'
     const runsQuery = workflowIds && workflowIds.length > 0
-      ? `SELECT DISTINCT workflow_id FROM runs WHERE status = 'running' AND workflow_id IN (${workflowIds.map(() => '?').join(',')})`
-      : "SELECT DISTINCT workflow_id FROM runs WHERE status = 'running'";
+      ? `SELECT DISTINCT workflow_id FROM runs WHERE status = 'running' AND scheduler = 'daemon' AND workflow_id IN (${workflowIds.map(() => '?').join(',')})`
+      : "SELECT DISTINCT workflow_id FROM runs WHERE status = 'running' AND scheduler = 'daemon'";
     
     const runsParams = workflowIds && workflowIds.length > 0 ? workflowIds : [];
     const activeWorkflows = db.prepare(runsQuery).all(...runsParams) as { workflow_id: string }[];
@@ -113,9 +118,9 @@ async function runDaemonLoop(workflowIds?: string[]): Promise<void> {
       console.log(`Processing workflow: ${workflowId}`);
       
       try {
-        // Load the workflow specification
+        // Load the workflow specification (with caching)
         const workflowDir = resolveWorkflowDir(workflowId);
-        const workflow: WorkflowSpec = await loadWorkflowSpec(workflowDir);
+        const workflow: WorkflowSpec = await getCachedWorkflow(workflowId, workflowDir, loadWorkflowSpec);
         
         // Process each agent in the workflow
         for (const agent of workflow.agents) {
