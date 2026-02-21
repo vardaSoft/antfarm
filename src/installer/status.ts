@@ -9,6 +9,7 @@ export type RunInfo = {
   task: string;
   status: string;
   context: string;
+  scheduler: string | null;
   created_at: string;
   updated_at: string;
 };

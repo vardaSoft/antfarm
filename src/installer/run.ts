@@ -11,7 +11,7 @@ export async function runWorkflow(params: {
   taskTitle: string;
   notifyUrl?: string;
   scheduler?: "cron" | "daemon"; // Added scheduler option
-}): Promise<{ id: string; runNumber: number; workflowId: string; task: string; status: string }> {
+}): Promise<{ id: string; runNumber: number; workflowId: string; task: string; status: string; scheduler?: "cron" | "daemon"; daemonInfo?: { pid: number; intervalMs?: number } }> {
   const workflowDir = resolveWorkflowDir(params.workflowId);
   const workflow = await loadWorkflowSpec(workflowDir);
   const db = getDb();
@@ -55,11 +55,19 @@ export async function runWorkflow(params: {
   }
 
   // Handle different schedulers
+  let daemonInfo: { pid: number; intervalMs?: number } | undefined;
   if (params.scheduler === "daemon") {
     // For daemon scheduler, start the spawner daemon instead of cron jobs
     try {
-      const { startDaemon } = await import("../daemon/daemonctl.js");
-      await startDaemon();
+      const { startDaemon, isRunning } = await import("../daemon/daemonctl.js");
+      const result = await startDaemon();
+      daemonInfo = { pid: result.pid };
+      
+      // Get additional daemon information
+      const daemonStatus = isRunning();
+      if (daemonStatus.running) {
+        daemonInfo.intervalMs = 30000; // Default interval
+      }
     } catch (err) {
       // Roll back the run since it can't advance without the daemon
       const db2 = getDb();
@@ -88,5 +96,20 @@ export async function runWorkflow(params: {
     stepId: workflow.steps[0]?.id,
   });
 
-  return { id: runId, runNumber, workflowId: workflow.id, task: params.taskTitle, status: "running" };
+  const result: { id: string; runNumber: number; workflowId: string; task: string; status: string; scheduler?: "cron" | "daemon"; daemonInfo?: { pid: number; intervalMs?: number } } = { 
+    id: runId, 
+    runNumber, 
+    workflowId: workflow.id, 
+    task: params.taskTitle, 
+    status: "running" 
+  };
+  
+  if (params.scheduler) {
+    result.scheduler = params.scheduler;
+    if (daemonInfo) {
+      result.daemonInfo = daemonInfo;
+    }
+  }
+  
+  return result;
 }

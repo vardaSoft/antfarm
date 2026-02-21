@@ -567,11 +567,13 @@ async function main() {
     if (result.status === "not_found") { process.stdout.write(`${result.message}\n`); return; }
     const { run, steps } = result;
     const runLabel = run.run_number != null ? `#${run.run_number} (${run.id})` : run.id;
+    const scheduler = run.scheduler || "cron"; // Default to cron if not set
     const lines = [
       `Run: ${runLabel}`,
       `Workflow: ${run.workflow_id}`,
       `Task: ${run.task.slice(0, 120)}${run.task.length > 120 ? "..." : ""}`,
       `Status: ${run.status}`,
+      `Scheduler: ${scheduler}`,
       `Created: ${run.created_at}`,
       `Updated: ${run.updated_at}`,
       "",
@@ -751,9 +753,29 @@ async function main() {
     const taskTitle = runArgs.join(" ").trim();
     if (!taskTitle) { process.stderr.write("Missing task title.\n"); printUsage(); process.exit(1); }
     const run = await runWorkflow({ workflowId: target, taskTitle, notifyUrl, scheduler });
-    process.stdout.write(
-      [`Run: #${run.runNumber} (${run.id})`, `Workflow: ${run.workflowId}`, `Task: ${run.task}`, `Status: ${run.status}`].join("\n") + "\n",
-    );
+    
+    // Enhanced output with scheduler information
+    const lines = [
+      `Run: #${run.runNumber} (${run.id})`,
+      `Workflow: ${run.workflowId}`,
+      `Task: ${run.task}`,
+      `Status: ${run.status}`,
+    ];
+    
+    // Add scheduler information if specified
+    if (scheduler) {
+      lines.push(`Scheduler: ${scheduler}`);
+      
+      // If using daemon scheduler, show additional information
+      if (scheduler === "daemon" && run.daemonInfo) {
+        lines.push(`Daemon: Running (PID ${run.daemonInfo.pid})`);
+        if (run.daemonInfo.intervalMs) {
+          lines.push(`Interval: ${run.daemonInfo.intervalMs}ms`);
+        }
+      }
+    }
+    
+    process.stdout.write(lines.join("\n") + "\n");
     return;
   }
 
