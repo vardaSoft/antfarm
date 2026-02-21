@@ -69,13 +69,18 @@ function migrate(db: DatabaseSync): void {
     );
 
     CREATE TABLE IF NOT EXISTS daemon_active_sessions (
-      agent_id TEXT PRIMARY KEY,
+      agent_id TEXT,
       step_id TEXT NOT NULL,
       run_id TEXT NOT NULL REFERENCES runs(id),
-      spawned_at TEXT NOT NULL
+      story_id TEXT,  -- NEW: For loop stories
+      spawned_at TEXT NOT NULL,
+      spawned_by TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      PRIMARY KEY (agent_id, step_id, COALESCE(story_id, ''))
     );
 
     CREATE INDEX IF NOT EXISTS idx_daemon_active_sessions_run_id ON daemon_active_sessions(run_id);
+    CREATE INDEX IF NOT EXISTS idx_daemon_active_sessions_story_id ON daemon_active_sessions(story_id);
   `);
 
   // Add columns to steps table for backwards compat
