@@ -1,6 +1,7 @@
 import { getDb } from "../db.js";
 import { peekAndSpawn } from "./spawner.js";
 import { cleanupAbandonedSteps } from "../installer/step-ops.js";
+import { emitEvent } from "../installer/events.js";
 import { loadWorkflowSpec } from "../installer/workflow-spec.js";
 import { resolveWorkflowDir } from "../installer/paths.js";
 import { getCachedWorkflow, getCacheMetrics } from "./cache.js";
@@ -43,20 +44,23 @@ export async function startDaemon(intervalMs: number = 30000, workflowIds?: stri
     await runDaemonLoop(workflowIds);
   }, intervalMs);
   
-  // Start the cleanup loop (every 5 minutes)
+  // Start the cleanup loop (every 2 minutes)
   cleanupInterval = setInterval(() => {
     if (isShuttingDown) return;
     try {
       console.log("Running abandoned steps cleanup");
       cleanupAbandonedSteps();
       
+      console.log("Running stale claiming state cleanup");  // ADDED
+      cleanupStaleClaimingState();  // ADDED
+      
       // Log cache metrics
       const metrics = getCacheMetrics();
       console.log(`Workflow cache metrics: ${metrics.hits} hits, ${metrics.misses} misses, ${Math.round(metrics.hitRate * 100)}% hit rate, ${metrics.size} entries`);
     } catch (error) {
-      console.error("Error during abandoned steps cleanup:", error);
+      console.error("Error during cleanup:", error);
     }
-  }, 5 * 60 * 1000); // 5 minutes
+  }, 2 * 60 * 1000); // 2 minutes (more frequent for claiming cleanup)
   
   // Start the stale sessions cleanup loop (every 10 minutes)
   staleCleanupInterval = setInterval(() => {
@@ -78,6 +82,13 @@ export async function startDaemon(intervalMs: number = 30000, workflowIds?: stri
       cleanupAbandonedSteps();
     } catch (error) {
       console.error("Error during initial abandoned steps cleanup:", error);
+    }
+    
+    try {
+      console.log("Running initial stale claiming state cleanup");
+      cleanupStaleClaimingState();
+    } catch (error) {
+      console.error("Error during initial stale claiming state cleanup:", error);
     }
     
     try {
@@ -249,4 +260,90 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.error("Failed to start daemon:", err);
     process.exit(1);
   });
+}
+
+/**
+ * Clean up steps/stories stuck in 'claiming' state (spawn failed or crashed)
+ */
+function cleanupStaleClaimingState(): void {
+  const db = getDb();
+
+  // Cleanup stale claiming steps (stuck for >5 minutes)
+  const staleSteps = db.prepare(
+    `SELECT id, agent_id, run_id, step_id, updated_at 
+     FROM steps 
+     WHERE status = 'claiming' 
+     AND updated_at < datetime('now', '-5 minutes')`
+  ).all() as Array<{ id: string; agent_id: string; run_id: string; step_id: string; updated_at: string }>;
+
+  for (const step of staleSteps) {
+    console.warn(`Cleaning up stale claiming step: ${step.step_id}`, { stepId: step.id });
+    
+    db.prepare("UPDATE steps SET status = 'pending', updated_at = datetime('now') WHERE id = ?").run(step.id);
+    
+    const incrementRetry = db.prepare("UPDATE steps SET retry_count = COALESCE(retry_count, 0) + 1 WHERE id = ?");
+    incrementRetry.run(step.id);
+
+    emitEvent({ 
+      ts: new Date().toISOString(), 
+      event: "step.rollback",
+      runId: step.run_id,
+      stepId: step.step_id,
+      agentId: step.agent_id,
+      detail: "stale_claiming"
+    });
+  }
+
+  // Cleanup stale claiming stories (stuck for >5 minutes)
+  const staleStories = db.prepare(
+    `SELECT s.id, s.story_id, s.run_id, st.step_id, st.agent_id 
+     FROM stories s
+     JOIN steps st ON st.id = st.current_story_id
+     WHERE s.status = 'claiming'
+     AND s.updated_at < datetime('now', '-5 minutes')`
+  ).all() as Array<{ id: string; story_id: string; run_id: string; step_id: string; agent_id: string }>;
+
+  for (const story of staleStories) {
+    console.warn(`Cleaning up stale claiming story: ${story.story_id}`, { storyId: story.id });
+    
+    // Revert story to pending
+    db.prepare("UPDATE stories SET status = 'pending', updated_at = datetime('now') WHERE id = ?").run(story.id);
+    
+    // Clear step's current_story_id
+    db.prepare("UPDATE steps SET current_story_id = NULL WHERE id = ?").run(story.step_id);
+    
+    // Increment story retry count
+    const incrementRetry = db.prepare("UPDATE stories SET retry_count = COALESCE(retry_count, 0) + 1 WHERE id = ?");
+    incrementRetry.run(story.id);
+
+    const wfId = getWorkflowId(story.run_id);
+    emitEvent({ 
+      ts: new Date().toISOString(), 
+      event: "story.rollback",
+      runId: story.run_id,
+      workflowId: wfId,
+      stepId: story.step_id,
+      agentId: story.agent_id,
+      storyId: story.story_id,
+      detail: "stale_claiming"
+    });
+  }
+
+  // Also cleanup orphan daemon_active_sessions entries
+  db.prepare(
+    `DELETE FROM daemon_active_sessions 
+     WHERE spawned_at < datetime('now', '-1 hour')
+     OR EXISTS (
+       SELECT 1 FROM steps s WHERE s.id = daemon_active_sessions.step_id AND s.status IN ('pending', 'waiting', 'done', 'failed')
+     )`
+  ).run();
+}
+
+// Helper function to get workflow ID (needed for event emission)
+function getWorkflowId(runId: string): string | undefined {
+  try {
+    const db = getDb();
+    const row = db.prepare("SELECT workflow_id FROM runs WHERE id = ?").get(runId) as { workflow_id: string } | undefined;
+    return row?.workflow_id;
+  } catch { return undefined; }
 }
