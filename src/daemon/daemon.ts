@@ -298,7 +298,7 @@ function cleanupStaleClaimingState(): void {
   const staleStories = db.prepare(
     `SELECT s.id, s.story_id, s.run_id, st.step_id, st.agent_id 
      FROM stories s
-     JOIN steps st ON st.id = st.current_story_id
+     JOIN steps st ON st.current_story_id = s.id
      WHERE s.status = 'claiming'
      AND s.updated_at < datetime('now', '-5 minutes')`
   ).all() as Array<{ id: string; story_id: string; run_id: string; step_id: string; agent_id: string }>;
@@ -335,6 +335,9 @@ function cleanupStaleClaimingState(): void {
      WHERE spawned_at < datetime('now', '-1 hour')
      OR EXISTS (
        SELECT 1 FROM steps s WHERE s.id = daemon_active_sessions.step_id AND s.status IN ('pending', 'waiting', 'done', 'failed')
+     )
+     OR NOT EXISTS (
+       SELECT 1 FROM steps s WHERE s.id = daemon_active_sessions.step_id
      )`
   ).run();
 }

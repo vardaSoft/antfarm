@@ -81,6 +81,12 @@ function migrate(db: DatabaseSync): void {
 
     CREATE INDEX IF NOT EXISTS idx_daemon_active_sessions_run_id ON daemon_active_sessions(run_id);
     CREATE INDEX IF NOT EXISTS idx_daemon_active_sessions_story_id ON daemon_active_sessions(story_id);
+    
+    // Additional indexes for performance
+    CREATE INDEX IF NOT EXISTS idx_steps_status ON steps(status);
+    CREATE INDEX IF NOT EXISTS idx_steps_agent_id ON steps(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_stories_status ON stories(status);
+    CREATE INDEX IF NOT EXISTS idx_stories_run_id ON stories(run_id);
   `);
 
   // Add columns to steps table for backwards compat
@@ -119,6 +125,10 @@ function migrate(db: DatabaseSync): void {
   if (!runColNames.has("scheduler")) {
     db.exec("ALTER TABLE runs ADD COLUMN scheduler TEXT");
   }
+  
+  // Add indexes for performance
+  db.exec("CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_runs_scheduler ON runs(scheduler)");
 }
 
 export function nextRunNumber(): number {

@@ -57,41 +57,33 @@ export async function peekAndSpawn(
 ): Promise<SpawnResult> {
   const db = getDb();
 
-  // Check for pending single steps
-  const peekResult = peekStep(agentId);
-  
-  if (peekResult === "NO_WORK") {
-    // Check for loop steps with pending stories
-    const loopStep = db.prepare(
-      "SELECT * FROM steps WHERE agent_id = ? AND type = 'loop' AND status = 'running' LIMIT 1"
-    ).get(agentId) as any;
-
-    if (loopStep) {
-      // Claim a story for the running loop step
-      const storyClaim = claimStory(agentId, loopStep.id);
-      
-      if (storyClaim && storyClaim.found && storyClaim.storyId) {
-        return await spawnForClaimed(agentId, workflow, storyClaim, loopStep.id, source);
-      }
-    }
-
-    return { spawned: false, reason: "no_work" };
-  }
-
-  // Single step flow
+  // First, try to claim a single step (this includes its own peek internally)
   const claimResult = claimStep(agentId);
   
-  if (!claimResult.found) {
-    return { spawned: false, reason: "race_condition" };
+  if (claimResult.found) {
+    if (!claimResult.stepId || !claimResult.runId || !claimResult.resolvedInput) {
+      throw new Error("Claimed step missing required fields");
+    }
+    
+    const { stepId, runId, resolvedInput } = claimResult;
+    return await spawnForClaimed(agentId, workflow, claimResult, stepId, source);
   }
 
-  if (!claimResult.stepId || !claimResult.runId || !claimResult.resolvedInput) {
-    throw new Error("Claimed step missing required fields");
+  // If no single step was claimed, check for loop steps with pending stories
+  const loopStep = db.prepare(
+    "SELECT * FROM steps WHERE agent_id = ? AND type = 'loop' AND status = 'running' LIMIT 1"
+  ).get(agentId) as any;
+
+  if (loopStep) {
+    // Try to atomically claim a story for the running loop step
+    const storyClaim = claimStory(agentId, loopStep.id);
+    
+    if (storyClaim && storyClaim.found && storyClaim.storyId) {
+      return await spawnForClaimed(agentId, workflow, storyClaim, loopStep.id, source);
+    }
   }
-  
-  const { stepId, runId, resolvedInput } = claimResult;
-  
-  return await spawnForClaimed(agentId, workflow, claimResult, stepId, source);
+
+  return { spawned: false, reason: "no_work" };
 }
 
 /**
@@ -419,10 +411,10 @@ async function spawnForClaimed(
         "UPDATE stories SET status = 'pending', updated_at = datetime('now') WHERE id = ? AND status = 'claiming'"
       ).run(claim.storyId);
       
-      // Clear step's current_story_id
+      // Clear step's current_story_id only if it matches the story we're rolling back
       db.prepare(
-        "UPDATE steps SET current_story_id = NULL WHERE id = ?"
-      ).run(stepId);
+        "UPDATE steps SET current_story_id = NULL WHERE id = ? AND current_story_id = ?"
+      ).run(stepId, claim.storyId);
     } else {
       // Revert step to 'pending'
       db.prepare(
