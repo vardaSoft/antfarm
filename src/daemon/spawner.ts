@@ -75,6 +75,18 @@ export async function peekAndSpawn(
   ).get(agentId) as any;
 
   if (loopStep) {
+    // Check if there's already a story running for this loop step
+    if (loopStep.current_story_id) {
+      const currentStory = db.prepare(
+        "SELECT status FROM stories WHERE id = ?"
+      ).get(loopStep.current_story_id) as { status: string } | undefined;
+      
+      if (currentStory && currentStory.status === 'running') {
+        // A story is already running, don't claim another one
+        return { spawned: false, reason: "story_already_running" };
+      }
+    }
+    
     // Try to atomically claim a story for the running loop step
     const storyClaim = claimStory(agentId, loopStep.id);
     
