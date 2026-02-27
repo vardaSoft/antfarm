@@ -1,5 +1,5 @@
 import { getDb } from "../db.js";
-import type { LoopConfig, Story } from "./types.js";
+import type { LoopConfig, Story, StoryStatus } from "./types.js";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -391,13 +391,38 @@ export type PeekResult = "HAS_WORK" | "NO_WORK";
  */
 export function peekStep(agentId: string): PeekResult {
   const db = getDb();
+  
+  // Check for pending steps
   const row = db.prepare(
     `SELECT COUNT(*) as cnt FROM steps s
      JOIN runs r ON r.id = s.run_id
-     WHERE s.agent_id = ? AND s.status = 'pending'
+     WHERE s.agent_id = ? 
+       AND s.status = 'pending'
        AND r.status = 'running'`
   ).get(agentId) as { cnt: number };
-  return row.cnt > 0 ? "HAS_WORK" : "NO_WORK";
+  
+  if (row.cnt > 0) return "HAS_WORK";
+
+  // CHANGED: Also check for loop steps with pending stories
+  const loopStep = db.prepare(
+    `SELECT s.id, s.run_id FROM steps s
+     JOIN runs r ON r.id = s.run_id
+     WHERE s.agent_id = ? 
+       AND s.type = 'loop'
+       AND s.status = 'running'
+       AND r.status = 'running'
+     LIMIT 1`
+  ).get(agentId) as { id: string; run_id: string } | undefined;
+
+  if (loopStep) {
+    const pendingStories = db.prepare(
+      "SELECT COUNT(*) as cnt FROM stories WHERE run_id = ? AND status = 'pending'"
+    ).get(loopStep.run_id) as { cnt: number };
+    
+    if (pendingStories.cnt > 0) return "HAS_WORK";
+  }
+
+  return "NO_WORK";
 }
 
 // ── Claim ───────────────────────────────────────────────────────────
@@ -407,6 +432,7 @@ interface ClaimResult {
   stepId?: string;
   runId?: string;
   resolvedInput?: string;
+  storyId?: string;  // ADDED: Track which story was claimed
 }
 
 /**
@@ -494,18 +520,30 @@ export function claimStep(agentId: string): ClaimResult {
         return { found: false };
       }
 
-      // Claim the story
+      // CHANGED: Set story to 'claiming' (not 'running')
       db.prepare(
-        "UPDATE stories SET status = 'running', updated_at = datetime('now') WHERE id = ?"
+        "UPDATE stories SET status = 'claiming', updated_at = datetime('now') WHERE id = ?"
       ).run(nextStory.id);
+      // Update step's current_story_id
       db.prepare(
-        "UPDATE steps SET status = 'running', current_story_id = ?, updated_at = datetime('now') WHERE id = ?"
+        "UPDATE steps SET current_story_id = ?, updated_at = datetime('now') WHERE id = ?"
       ).run(nextStory.id, step.id);
 
       const wfId = getWorkflowId(step.run_id);
-      emitEvent({ ts: new Date().toISOString(), event: "step.running", runId: step.run_id, workflowId: wfId, stepId: step.step_id, agentId: agentId });
-      emitEvent({ ts: new Date().toISOString(), event: "story.started", runId: step.run_id, workflowId: wfId, stepId: step.step_id, agentId: agentId, storyId: nextStory.story_id, storyTitle: nextStory.title });
-      logger.info(`Story started: ${nextStory.story_id} — ${nextStory.title}`, { runId: step.run_id, stepId: step.step_id });
+      
+      // ADDED: Emit story.claimed event (not story.started yet)
+      emitEvent({ 
+        ts: new Date().toISOString(), 
+        event: "story.claimed",
+        runId: step.run_id,
+        workflowId: wfId,
+        stepId: step.step_id,
+        agentId,
+        storyId: nextStory.story_id,
+        storyTitle: nextStory.title
+      });
+      
+      logger.info(`Story claimed: ${nextStory.story_id} — ${nextStory.title}`, { runId: step.run_id, stepId: step.step_id });
 
       // Build story template vars
       const story: Story = {
@@ -540,15 +578,30 @@ export function claimStep(agentId: string): ClaimResult {
       db.prepare("UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(context), step.run_id);
 
       const resolvedInput = resolveTemplate(step.input_template, context);
-      return { found: true, stepId: step.id, runId: step.run_id, resolvedInput };
+      
+      // ADDED: Track which story was claimed
+      return { found: true, stepId: step.id, runId: step.run_id, resolvedInput, storyId: nextStory.id };
     }
   }
 
-  // Single step: existing logic
+  // CHANGED: Set status to 'claiming' instead of 'running'
   db.prepare(
-    "UPDATE steps SET status = 'running', updated_at = datetime('now') WHERE id = ? AND status = 'pending'"
+    "UPDATE steps SET status = 'claiming', updated_at = datetime('now') WHERE id = ? AND status = 'pending'"
   ).run(step.id);
-  emitEvent({ ts: new Date().toISOString(), event: "step.running", runId: step.run_id, workflowId: getWorkflowId(step.run_id), stepId: step.step_id, agentId: agentId });
+
+  // REMOVED: Don't emit step.running yet
+  // emitEvent({ ts: new Date().toISOString(), event: "step.running", runId: step.run_id, workflowId: getWorkflowId(step.run_id), stepId: step.step_id, agentId: agentId });
+
+  // ADDED: Emit step.claimed event
+  const wfId = getWorkflowId(step.run_id);
+  emitEvent({ 
+    ts: new Date().toISOString(), 
+    event: "step.claimed",
+    runId: step.run_id,
+    workflowId: wfId,
+    stepId: step.step_id,
+    agentId
+  });
   logger.info(`Step claimed by ${agentId}`, { runId: step.run_id, stepId: step.step_id });
 
   // Inject progress for any step in a run that has stories
@@ -566,6 +619,96 @@ export function claimStep(agentId: string): ClaimResult {
     stepId: step.id,
     runId: step.run_id,
     resolvedInput,
+  };
+}
+
+/**
+ * Claim a story for a loop step.
+ * Sets story status to 'claiming' and returns story context.
+ * Returns null if no pending story exists.
+ */
+export function claimStory(agentId: string, stepId: string): ClaimResult | null {
+  const db = getDb();
+
+  // Find the loop step
+  const step = db.prepare(
+    "SELECT * FROM steps WHERE id = ? AND agent_id = ? AND type = 'loop'"
+  ).get(stepId, agentId) as any;
+
+  if (!step) return null;
+
+  // Find next pending story
+  const nextStory = db.prepare(
+    "SELECT * FROM stories WHERE run_id = ? AND status = 'pending' ORDER BY story_index LIMIT 1"
+  ).get(step.run_id) as any;
+
+  if (!nextStory) return null;
+
+  // CHANGED: Set story to 'claiming' (not 'running')
+  db.prepare(
+    "UPDATE stories SET status = 'claiming', updated_at = datetime('now') WHERE id = ?"
+  ).run(nextStory.id);
+
+  // Update step's current_story_id
+  db.prepare(
+    "UPDATE steps SET current_story_id = ?, updated_at = datetime('now') WHERE id = ?"
+  ).run(nextStory.id, step.id);
+
+  // Build context from story
+  const run = db.prepare("SELECT context FROM runs WHERE id = ?").get(step.run_id) as { context: string };
+  let context: Record<string, string> = JSON.parse(run.context);
+
+  const story: Story = {
+    id: nextStory.id,
+    runId: nextStory.run_id,
+    storyIndex: nextStory.story_index,
+    storyId: nextStory.story_id,
+    title: nextStory.title,
+    description: nextStory.description,
+    acceptanceCriteria: JSON.parse(nextStory.acceptance_criteria),
+    status: nextStory.status as StoryStatus,
+    output: nextStory.output ?? undefined,
+    retryCount: nextStory.retry_count,
+    maxRetries: nextStory.max_retries,
+  };
+
+  const allStories = getStories(step.run_id);
+  const pendingCount = allStories.filter(s => s.status === 'pending' || s.status === 'claiming').length;
+
+  context["current_story"] = formatStoryForTemplate(story);
+  context["current_story_id"] = story.storyId;
+  context["current_story_title"] = story.title;
+  context["completed_stories"] = formatCompletedStories(allStories);
+  context["stories_remaining"] = String(pendingCount);
+  context["progress"] = readProgressFile(step.run_id);
+
+  // Update run context
+  db.prepare(
+    "UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?"
+  ).run(JSON.stringify(context), step.run_id);
+
+  // ADDED: Emit story.claimed event (not story.started yet)
+  const wfId = getWorkflowId(step.run_id);
+  emitEvent({ 
+    ts: new Date().toISOString(), 
+    event: "story.claimed",
+    runId: step.run_id,
+    workflowId: wfId,
+    stepId: step.step_id,
+    agentId,
+    storyId: nextStory.story_id,
+    storyTitle: nextStory.title
+  });
+
+  // Resolve input template
+  const resolvedInput = resolveTemplate(step.input_template, context);
+
+  return {
+    found: true,
+    stepId: step.id,
+    runId: step.run_id,
+    resolvedInput,
+    storyId: nextStory.id  // ADDED: Track which story was claimed
   };
 }
 

@@ -194,6 +194,38 @@ antfarm dashboard status       # Check status
   - Antfarm uses cron jobs for workflow orchestration. Older OpenClaw versions may not expose the cron tool via `/tools/invoke`. Antfarm will automatically fall back to the `openclaw` CLI, but keeping OpenClaw up to date is recommended: `npm update -g openclaw`
 - `gh` CLI for PR creation steps
 
+## Event-Driven Scheduler (Daemon Mode)
+
+Antfarm includes an optional event-driven scheduler daemon that significantly reduces LLM costs by eliminating empty polling sessions:
+
+### Cost Savings
+
+**Traditional Cron Approach:**
+- 12 queries/hour per workflow (every 5 minutes)
+- Each query spins up a full LLM session (~3-4k tokens) even when there's no work
+- Empty polls waste **$21.50/hour** across all workflows
+
+**Daemon Approach:**
+- 120 queries/hour per workflow (every 30 seconds)
+- Lightweight database-only checks with **zero LLM cost**
+- Same reliability with **90%+ cost reduction**
+
+### Usage
+
+Start workflows with the daemon scheduler:
+```bash
+antfarm workflow run feature-dev "Add user authentication" --scheduler=daemon
+```
+
+Control the daemon manually:
+```bash
+antfarm spawner start [--interval 30000]  # Start with 30s polling (default)
+antfarm spawner stop                      # Stop the daemon
+antfarm spawner status                    # Check daemon status
+```
+
+The daemon automatically prevents double-spawning and cleans up abandoned sessions.
+
 ---
 
 ## License

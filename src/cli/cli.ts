@@ -104,6 +104,10 @@ function printUsage() {
       "antfarm dashboard stop                  Stop dashboard daemon",
       "antfarm dashboard status                Check dashboard status",
       "",
+      "antfarm spawner [start] [--interval N]   Start spawner daemon (default: 30000ms)",
+      "antfarm spawner stop                     Stop spawner daemon",
+      "antfarm spawner status                   Check spawner status",
+      "",
       "antfarm step peek <agent-id>        Lightweight check for pending work (HAS_WORK or NO_WORK)",
       "antfarm step claim <agent-id>       Claim pending step, output resolved input as JSON",
       "antfarm step complete <step-id>      Complete step (reads output from stdin)",
@@ -268,6 +272,69 @@ async function main() {
     const result = await startDaemon(port);
     console.log(`Dashboard started (PID ${result.pid})`);
     console.log(`  http://localhost:${result.port}`);
+    return;
+  }
+
+  if (group === "spawner") {
+    // Import spawner daemon control functions dynamically to avoid circular dependencies
+    const { startDaemon: startSpawnerDaemon, stopDaemon: stopSpawnerDaemon, isRunning: isSpawnerRunning, getSpawnerStatus } = await import("../daemon/daemonctl.js");
+
+    const sub = args[1];
+
+    if (sub === "stop") {
+      if (stopSpawnerDaemon()) {
+        console.log("Spawner daemon stopped.");
+      } else {
+        console.log("Spawner daemon is not running.");
+      }
+      return;
+    }
+
+    if (sub === "status") {
+      const st = isSpawnerRunning();
+      if (st.running) {
+        console.log(`Spawner daemon running (PID ${st.pid})`);
+        // Try to get additional information from the status function
+        const detailedStatus = getSpawnerStatus();
+        if (detailedStatus.intervalMs) {
+          console.log(`  Interval: ${detailedStatus.intervalMs}ms`);
+        }
+        if (detailedStatus.monitoredWorkflows) {
+          console.log(`  Monitoring workflows: ${detailedStatus.monitoredWorkflows.join(", ")}`);
+        }
+      } else {
+        console.log("Spawner daemon is not running.");
+      }
+      return;
+    }
+
+    // start (explicit or implicit)
+    let intervalMs = 30000; // default 30 seconds
+    const intervalIdx = args.indexOf("--interval");
+    if (intervalIdx !== -1 && args[intervalIdx + 1]) {
+      intervalMs = parseInt(args[intervalIdx + 1], 10) || 30000;
+      if (intervalMs < 10000) {
+        console.error("Error: Interval must be at least 10000ms (10 seconds)");
+        process.exit(1);
+      }
+    }
+
+    const spawnerStatus = isSpawnerRunning();
+    if (spawnerStatus.running) {
+      console.log(`Spawner daemon already running (PID ${spawnerStatus.pid})`);
+      return;
+    }
+
+    try {
+      const result = await startSpawnerDaemon({ intervalMs });
+      console.log(`Spawner daemon started (PID ${result.pid})`);
+      console.log(`  Polling interval: ${intervalMs}ms`);
+    } catch (err) {
+      const logFile = (await import("../daemon/daemonctl.js")).getSpawnerLogFile();
+      console.error(`Failed to start spawner daemon: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`Check log file for details: ${logFile}`);
+      process.exit(1);
+    }
     return;
   }
 
@@ -500,11 +567,13 @@ async function main() {
     if (result.status === "not_found") { process.stdout.write(`${result.message}\n`); return; }
     const { run, steps } = result;
     const runLabel = run.run_number != null ? `#${run.run_number} (${run.id})` : run.id;
+    const scheduler = run.scheduler || "cron"; // Default to cron if not set
     const lines = [
       `Run: ${runLabel}`,
       `Workflow: ${run.workflow_id}`,
       `Task: ${run.task.slice(0, 120)}${run.task.length > 120 ? "..." : ""}`,
       `Status: ${run.status}`,
+      `Scheduler: ${scheduler}`,
       `Created: ${run.created_at}`,
       `Updated: ${run.updated_at}`,
       "",
@@ -658,18 +727,55 @@ async function main() {
 
   if (action === "run") {
     let notifyUrl: string | undefined;
+    let scheduler: "cron" | "daemon" | undefined;
     const runArgs = args.slice(3);
+    
+    // Parse --notify-url
     const nuIdx = runArgs.indexOf("--notify-url");
     if (nuIdx !== -1) {
       notifyUrl = runArgs[nuIdx + 1];
       runArgs.splice(nuIdx, 2);
     }
+    
+    // Parse --scheduler
+    const schedulerIdx = runArgs.indexOf("--scheduler");
+    if (schedulerIdx !== -1) {
+      const schedulerValue = runArgs[schedulerIdx + 1];
+      if (schedulerValue === "cron" || schedulerValue === "daemon") {
+        scheduler = schedulerValue;
+        runArgs.splice(schedulerIdx, 2);
+      } else {
+        process.stderr.write(`Invalid scheduler value: ${schedulerValue}. Must be 'cron' or 'daemon'.\n`);
+        process.exit(1);
+      }
+    }
+    
     const taskTitle = runArgs.join(" ").trim();
     if (!taskTitle) { process.stderr.write("Missing task title.\n"); printUsage(); process.exit(1); }
-    const run = await runWorkflow({ workflowId: target, taskTitle, notifyUrl });
-    process.stdout.write(
-      [`Run: #${run.runNumber} (${run.id})`, `Workflow: ${run.workflowId}`, `Task: ${run.task}`, `Status: ${run.status}`].join("\n") + "\n",
-    );
+    const run = await runWorkflow({ workflowId: target, taskTitle, notifyUrl, scheduler });
+    
+    // Enhanced output with scheduler information
+    const lines = [
+      `Run: #${run.runNumber} (${run.id})`,
+      `Workflow: ${run.workflowId}`,
+      `Task: ${run.task}`,
+      `Status: ${run.status}`,
+    ];
+    
+    // Add scheduler information if specified
+    if (scheduler) {
+      lines.push(`Scheduler: ${scheduler}`);
+      
+      // If using daemon scheduler, show additional information
+      if (scheduler === "daemon" && run.daemonInfo) {
+        lines.push(`Daemon: Running (PID ${run.daemonInfo.pid})`);
+        if (run.daemonInfo.intervalMs) {
+          lines.push(`Interval: ${run.daemonInfo.intervalMs}ms`);
+        }
+      }
+    }
+    
+    process.stdout.write(lines.join("\n") + "\n");
     return;
   }
 

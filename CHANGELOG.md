@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.2.3 — 2026-02-21
+
+### Fixed
+- **Scheduler Conflict Prevention**: Daemon now filters runs by `scheduler = 'daemon'` to prevent processing cron-scheduled runs
+- **Session Tracking Race Condition**: Fixed DELETE statement in catch block and reduced stale session timeout from 45 min to 15 min
+- **Inefficient Daemon Loop**: Added in-memory cache for workflow specs with 5-minute TTL and file change detection
+- **Missing Timeout Configuration**: Timeout now derived from `agent.timeoutSeconds` only (removed `workflow.polling.timeoutSeconds`) with 3600s default
+- **Redundant Files**: Removed compiled `daemon.js` from repository and updated `.gitignore`
+
+### Added
+- **Gateway API Fallback**: Daemon now attempts Gateway API for session spawning with CLI fallback
+- Unit tests for daemon and spawner modules
+- Cache metrics logging in daemon cleanup loop
+
 ## v0.2.2 — 2026-02-11
 
 ### Fixed
