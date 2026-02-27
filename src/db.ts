@@ -72,17 +72,20 @@ function migrate(db: DatabaseSync): void {
       agent_id TEXT,
       step_id TEXT NOT NULL,
       run_id TEXT NOT NULL REFERENCES runs(id),
-      story_id TEXT,  -- NEW: For loop stories
+      story_id TEXT,
       spawned_at TEXT NOT NULL,
       spawned_by TEXT NOT NULL,
       session_id TEXT NOT NULL,
-      PRIMARY KEY (agent_id, step_id, COALESCE(story_id, ''))
+      PRIMARY KEY (agent_id, step_id, story_id)
     );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_daemon_active_sessions_pk
+    ON daemon_active_sessions(agent_id, step_id, COALESCE(story_id, ''));
 
     CREATE INDEX IF NOT EXISTS idx_daemon_active_sessions_run_id ON daemon_active_sessions(run_id);
     CREATE INDEX IF NOT EXISTS idx_daemon_active_sessions_story_id ON daemon_active_sessions(story_id);
-    
-    // Additional indexes for performance
+
+    -- Additional indexes for performance
     CREATE INDEX IF NOT EXISTS idx_steps_status ON steps(status);
     CREATE INDEX IF NOT EXISTS idx_steps_agent_id ON steps(agent_id);
     CREATE INDEX IF NOT EXISTS idx_stories_status ON stories(status);
@@ -129,6 +132,73 @@ function migrate(db: DatabaseSync): void {
   // Add indexes for performance
   db.exec("CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_runs_scheduler ON runs(scheduler)");
+
+  // ============================================================
+  // Migration fix v2.1.1: Fix daemon_active_sessions primary key
+  // ============================================================
+  try {
+    // Check if the old unique index exists (indicates old schema with COALESCE PK)
+    const indexExists = db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type='index'
+      AND name='idx_daemon_active_sessions_pk'
+      AND tbl_name='daemon_active_sessions'
+    `).get();
+
+    // Check if new schema is already applied ( PRIMARY KEY includes story_id without COALESCE )
+    const tableInfo = db.prepare("PRAGMA table_info(daemon_active_sessions)").all() as Array<{ name: string; pk: number; }>;
+    const isNewSchema = tableInfo.filter(col => col.pk === 1).some(col => col.name === 'story_id');
+
+    // If old index exists AND new schema not yet applied, migrate
+    const isOldSchema = indexExists && !isNewSchema;
+
+    if (isOldSchema) {
+      console.log("🔧 Migrating daemon_active_sessions primary key...");
+
+      // Step 1: Create new table with correct schema
+      db.exec(`
+        CREATE TABLE daemon_active_sessions_new (
+          agent_id TEXT,
+          step_id TEXT NOT NULL,
+          run_id TEXT NOT NULL REFERENCES runs(id),
+          story_id TEXT,
+          spawned_at TEXT NOT NULL,
+          spawned_by TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          PRIMARY KEY (agent_id, step_id, story_id)
+        )
+      `);
+
+      // Step 2: Copy data (including any existing data)
+      db.exec(`
+        INSERT INTO daemon_active_sessions_new
+        SELECT * FROM daemon_active_sessions
+      `);
+
+      // Check if data was copied
+      const rowCount = db.prepare("SELECT COUNT(*) as cnt FROM daemon_active_sessions_new").get() as { cnt: number };
+      console.log(`  -> Migrated ${rowCount.cnt} session records`);
+
+      // Step 3: Drop old table
+      db.exec(`DROP TABLE daemon_active_sessions`);
+
+      // Step 4: Rename new table
+      db.exec(`ALTER TABLE daemon_active_sessions_new RENAME TO daemon_active_sessions`);
+
+      // Step 5: Recreate indexes with correct schema
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_daemon_active_sessions_pk
+        ON daemon_active_sessions(agent_id, step_id, COALESCE(story_id, ''));
+        CREATE INDEX IF NOT EXISTS idx_daemon_active_sessions_run_id ON daemon_active_sessions(run_id);
+        CREATE INDEX IF NOT EXISTS idx_daemon_active_sessions_story_id ON daemon_active_sessions(story_id);
+      `);
+
+      console.log("✅ daemon_active_sessions primary key migration complete");
+    }
+  } catch (error) {
+    console.error("⚠️ Failed to migrate daemon_active_sessions:", error);
+    // Don't throw - let the system continue with existing schema if migration fails
+  }
 }
 
 export function nextRunNumber(): number {
