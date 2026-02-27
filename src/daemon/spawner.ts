@@ -10,25 +10,44 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-interface GatewayConfig {
-  url: string;
-  secret?: string;
+// ========================================
+// Gateway Call CLI Parameters (v2.1)
+// ========================================
+interface GatewayCallParams {
+  idempotencyKey: string;
+  agentId: string;
+  sessionKey: string;
+  message: string;
+  timeout: number;
+  thinking: 'off' | 'minimal' | 'low' | 'medium' | 'high';
 }
 
-async function getGatewayConfig(): Promise<GatewayConfig | null> {
-  try {
-    const configPath = path.join(os.homedir(), ".openclaw", "openclaw.json");
-    const config = JSON.parse(await fs.promises.readFile(configPath, "utf-8"));
-    if (config.gateway?.url) {
-      return {
-        url: config.gateway.url,
-        secret: config.gateway.secret
-      };
-    }
-  } catch {
-    // Config not found or invalid, fall back to CLI
-  }
-  return null;
+interface GatewayCallResponse {
+  runId?: string;
+  status?: string;
+  sessionId?: string;
+  acceptedAt?: number;
+  error?: string;
+}
+
+// ========================================
+// Gateway Status Response Interfaces (NEU v2.1)
+// ========================================
+interface AgentSessionInfo {
+  agentId: string;
+  recent?: Array<{
+    key: string;
+    sessionId: string;
+    status?: string;
+    startedAt?: number;
+    [key: string]: any;
+  }>;
+}
+
+interface GatewayStatusResponse {
+  sessions?: {
+    byAgent?: AgentSessionInfo[];
+  };
 }
 
 interface SpawnResult {
@@ -98,70 +117,158 @@ export async function peekAndSpawn(
   return { spawned: false, reason: "no_work" };
 }
 
+// ========================================
+// Gateway Session ID Query Helper (v2.1)
+// ========================================
+/**
+ * Query Gateway status to find actual sessionId for a given sessionKey
+ * Retries up to 5 times with 1s delay between attempts
+ *
+ * Returns the actual session UUID if found, null otherwise
+ *
+ * v2.1 Improvements:
+ * - Type-safe with GatewayStatusResponse interface
+ * - Debug logging on failures (on last attempt)
+ * - Attempt number logging for visibility
+ */
+async function getSessionIdFromGateway(
+  sessionKey: string,
+  agentId: string,
+  maxRetries: number = 5,
+  retryDelayMs: number = 1000
+): Promise<string | null> {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const openclawBin = await findOpenclawBinary();
+      const isNpx = openclawBin.startsWith("npx");
+
+      const args = isNpx
+        ? ["openclaw", "gateway", "call", "status", "--json"]
+        : ["gateway", "call", "status", "--json"];
+
+      const child = execFile(openclawBin, args, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 10000  // ⚠️ v2.1: Gateway status query timeout
+      } as any);
+
+      let stdoutData = '';
+      child.stdout?.on('data', (data) => { stdoutData += data.toString(); });
+
+      const result = await new Promise<{ sessionId?: string; error?: string }>((resolve) => {
+        child.on('close', (code) => {
+          if (code === 0) {
+            try {
+              // ⚠️ v2.1: Type-safe parsing with GatewayStatusResponse
+              const statusData: GatewayStatusResponse = JSON.parse(stdoutData.trim());
+
+              // Check if sessions.byAgent exists
+              if (statusData.sessions?.byAgent) {
+                // ⚠️ v2.1: Type-safe find (no 'any' casting)
+                const agentSessions: AgentSessionInfo | undefined =
+                  statusData.sessions.byAgent.find((a: AgentSessionInfo) => a.agentId === agentId);
+
+                if (agentSessions?.recent) {
+                  const matchingSession = agentSessions.recent.find((s: any) =>
+                    s.key === sessionKey && s.sessionId
+                  );
+
+                  if (matchingSession?.sessionId) {
+                    // ⚠️ v2.1: Log attempt number on success
+                    console.log(`[spawnAgentSession] Session ID found on attempt ${attempt + 1}: ${matchingSession.sessionId}`);
+                    resolve({ sessionId: matchingSession.sessionId });
+                    return;
+                  }
+                }
+              }
+
+              // ⚠️ v2.1: Debug logging on failure
+              console.warn(`[getSessionIdFromGateway] Session not found (attempt ${attempt + 1}/${maxRetries})`);
+
+              // On last attempt, log full response for debugging
+              if (attempt === maxRetries - 1) {
+                console.warn(`[getSessionIdFromGateway] Full response:`, JSON.stringify(statusData, null, 2));
+              }
+
+              resolve({ error: 'Session not found' });
+
+            } catch (e) {
+              console.error(`[getSessionIdFromGateway] Parse error on attempt ${attempt + 1}:`, e);
+              resolve({ error: String(e) });
+            }
+          } else {
+            console.error(`[getSessionIdFromGateway] Gateway call failed with code ${code} on attempt ${attempt + 1}`);
+            resolve({ error: `Failed with code ${code}` });
+          }
+        });
+
+        child.on('error', (err) => {
+          console.error(`[getSessionIdFromGateway] Child error on attempt ${attempt + 1}:`, err);
+          resolve({ error: err.message });
+        });
+      });
+
+      if (result.sessionId) return result.sessionId;
+      if (attempt < maxRetries - 1) {
+        await new Promise(r => setTimeout(r, retryDelayMs));
+      }
+    } catch (error) {
+      console.error(`[getSessionIdFromGateway] Exception on attempt ${attempt + 1}:`, error);
+      if (attempt < maxRetries - 1) {
+        await new Promise(r => setTimeout(r, retryDelayMs));
+      }
+    }
+  }
+
+  console.warn(`[getSessionIdFromGateway] Failed to retrieve sessionId after ${maxRetries} attempts`);
+  return null;
+}
+
 /**
  * Spawn an OpenClaw agent session via gateway API with the specified parameters.
  * Records the session in the daemon_active_sessions table before spawning.
  */
-export async function spawnAgentSession(
-  agentId: string, 
-  stepId: string, 
-  runId: string, 
-  input: string, 
-  model: string,
-  timeoutSeconds: number
-): Promise<{ sessionId?: string }> {
-  // Try Gateway API first
-  try {
-    const gateway = await getGatewayConfig();
-    if (gateway) {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (gateway.secret) headers['Authorization'] = `Bearer ${gateway.secret}`;
-
-      const response = await fetch(`${gateway.url}/api/tools/call`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          tool: 'sessions_spawn',
-          args: {
-            task: input,
-            agent_id: agentId,
-            model: model,
-            thinking: 'high',
-            timeout_ms: timeoutSeconds * 1000
-          }
-        })
-      });
-
-      if (response.ok) {
-        const result = await response.json();
-        console.log(`Spawned agent session via Gateway API for ${agentId}`);
-        return { sessionId: result.sessionId || result.id };
-      } else {
-        console.warn(`Gateway API returned status ${response.status}, falling back to CLI`);
-      }
-    }
-  } catch (err) {
-    console.warn('Gateway API failed, falling back to CLI:', err);
-  }
-
-  // Fallback to CLI
-  return await spawnAgentSessionCLI(agentId, stepId, runId, input, model, timeoutSeconds);
-}
-
+// ========================================
+// Agent Session Spawner (v2.1)
+// ========================================
 /**
- * Spawn an OpenClaw agent session via CLI with the specified parameters.
+ * Spawn an OpenClaw agent session via openclaw gateway call agent CLI.
  * Records the session in the daemon_active_sessions table before spawning.
+ *
+ * v2.1 Changes:
+ * - No model parameter (Gateway validates internally)
+ * - Full work prompt with completion instructions
+ * - Extended logging (including idempotencyKey)
+ * - Actual sessionId query via getSessionIdFromGateway
+ *
+ * @param agentId - Agent to spawn
+ * @param stepId - Step ID for tracking
+ * @param runId - Workflow run ID
+ * @param input - Resolved task instructions
+ * @param timeoutSeconds - Agent execution timeout (default: 1800s)
+ * @param storyId - Optional story ID for loop steps
+ * @returns Session ID (actual UUID from Gateway)
  */
-async function spawnAgentSessionCLI(
-  agentId: string, 
-  stepId: string, 
-  runId: string, 
-  input: string, 
-  model: string,
-  timeoutSeconds: number
+export async function spawnAgentSession(
+  agentId: string,
+  stepId: string,
+  runId: string,
+  input: string,
+  timeoutSeconds: number,  // ✅ NO model parameter
+  storyId?: string
 ): Promise<{ sessionId?: string }> {
-  // Build the work prompt similar to what's used in agent-cron.ts
-  const cli = path.join(os.homedir(), ".openclaw", "antfarm", "bin", "antfarm");
+
+  // ========================================
+  // 1. Generate unique identifiers
+  // ========================================
+  const idempotencyKey = `antfarm:${runId}:${stepId}:${storyId || 'root'}:${Math.random().toString(36).substring(7)}`;
+  const sessionKey = `agent:${agentId}:workflow:${runId}:${stepId}`;
+
+  console.log(`[spawnAgentSession] IdempotencyKey: ${idempotencyKey}`);  // ⚠️ v2.1: NEW logging
+
+  // ========================================
+  // 2. Build work prompt with completion instructions
+  // ========================================
+  const antfarmPath = path.join(os.homedir(), ".openclaw", "antfarm", "bin", "antfarm");
   const workPrompt = `You are an Antfarm workflow agent. Execute the pending work below.
 
 ⚠️ CRITICAL: You MUST call "step complete" or "step fail" before ending your session. If you don't, the workflow will be stuck forever. This is non-negotiable.
@@ -179,12 +286,12 @@ STATUS: done
 CHANGES: what you did
 TESTS: what tests you ran
 ANTFARM_EOF
-cat /tmp/antfarm-step-output.txt | node ${cli} step complete "${stepId}"
+cat /tmp/antfarm-step-output.txt | node ${antfarmPath} step complete "${stepId}"
 \`\`\`
 
 If the work FAILED:
 \`\`\`
-node ${cli} step fail "${stepId}" "description of what went wrong"
+node ${antfarmPath} step fail "${stepId}" "description of what went wrong"
 \`\`\`
 
 RULES:
@@ -197,55 +304,102 @@ The workflow cannot advance until you report. Your session ending without report
 INPUT:
 ${input}`;
 
-  // Find the openclaw binary
-  const openclawBin = await findOpenclawBinary();
-  
-  // Prepare the spawn command arguments
-  const args = [
-    "sessions", 
-    "spawn",
-    "--agent", agentId,
-    "--model", model,
-    "--think", "high",
-    "--timeout", String(timeoutSeconds),
-  ];
-  
+  // ========================================
+  // 3. Prepare Gateway Call parameters
+  // ========================================
+  const gatewayParams: GatewayCallParams = {
+    idempotencyKey,
+    agentId: agentId,
+    sessionKey: sessionKey,
+    message: workPrompt,
+    timeout: timeoutSeconds,
+    thinking: 'high'
+  };
+
   try {
-    // Spawn the session using the openclaw CLI
-    const child = execFile(openclawBin, args, { 
+    const openclawBin = await findOpenclawBinary();
+
+    // ========================================
+    // 4. Log spawn attempt (v2.1: extended)
+    // ========================================
+    console.log(`[spawnAgentSession] Spawning agent ${agentId} via Gateway Call CLI`);
+    console.log(`[spawnAgentSession] SessionKey: ${sessionKey}`);
+    console.log(`[spawnAgentSession] Agent ID: ${agentId}`);
+    console.log(`[spawnAgentSession] Timeout: ${timeoutSeconds}s`);
+    console.log(`[spawnAgentSession] Story ID: ${storyId || 'none (single step)'}`);
+
+    // ========================================
+    // 5. Execute Gateway Call CLI
+    // ========================================
+    const isNpx = openclawBin.startsWith("npx");
+    const args = isNpx
+      ? ["openclaw", "gateway", "call", "agent", "--params", JSON.stringify(gatewayParams), "--json"]
+      : ["gateway", "call", "agent", "--params", JSON.stringify(gatewayParams), "--json"];
+
+    console.log(`[spawnAgentSession] Executing: ${isNpx ? 'npx' : openclawBin} gateway call agent --params '...' --json`);
+
+    const child = execFile(openclawBin, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 30000 // 30 second timeout for the spawn command itself
+      timeout: 30000  // 30 seconds for spawn command itself (not agent execution)
     } as any);
-    
-    // Send the work prompt to stdin
-    child.stdin?.write(workPrompt);
-    child.stdin?.end();
-    
-    // Capture stdout to extract session ID
+
     let stdoutData = '';
-    child.stdout?.on('data', (data) => {
-      stdoutData += data.toString();
-    });
-    
-    // Wait for the process to complete and get session ID
-    const sessionId = await new Promise<string | null>((resolve, reject) => {
+    child.stdout?.on('data', (data) => { stdoutData += data.toString(); });
+
+    const result = await new Promise<{ runId?: string; error?: string }>((resolve) => {
       child.on('close', (code) => {
         if (code === 0) {
-          // Try to extract session ID from stdout
-          const match = stdoutData.match(/session_id["']?\s*:\s*["']?([a-zA-Z0-9-]+)/);
-          resolve(match ? match[1] : null);
+          try {
+            const response: GatewayCallResponse = JSON.parse(stdoutData.trim());
+
+            if (response.status === 'accepted' && response.runId) {
+              console.log(`[spawnAgentSession] Gateway accepted (runId: ${response.runId})`);
+              resolve({ runId: response.runId });
+            } else {
+              const errorMsg = `Unexpected response: ${JSON.stringify(response)}`;
+              console.error(`[spawnAgentSession] ${errorMsg}`);
+              resolve({ error: errorMsg });
+            }
+          } catch (e) {
+            const errorMsg = `Failed to parse response: ${e}`;
+            console.error(`[spawnAgentSession] ${errorMsg}`);
+            resolve({ error: errorMsg });
+          }
         } else {
-          reject(new Error(`OpenClaw session spawn failed with code ${code}`));
+          const errorMsg = `Gateway call failed with code ${code}`;
+          console.error(`[spawnAgentSession] ${errorMsg}`);
+          resolve({ error: errorMsg });
         }
       });
-      
+
       child.on('error', (err) => {
-        reject(err);
+        const errorMsg = `Gateway call error: ${err.message}`;
+        console.error(`[spawnAgentSession] ${errorMsg}`);
+        resolve({ error: errorMsg });
       });
     });
-    
-    return { sessionId: sessionId || undefined };
+
+    if (result.error) throw new Error(result.error);
+
+    // ========================================
+    // 6. Query for actual sessionId (v2.1: with detailed logging)
+    // ========================================
+    console.log(`[spawnAgentSession] Querying Gateway for actual sessionId...`);
+    const actualSessionId = await getSessionIdFromGateway(sessionKey, agentId);
+
+    const sessionId = actualSessionId || result.runId;
+
+    if (actualSessionId) {
+      console.log(`[spawnAgentSession] ✅ Retrieved actual sessionId: ${actualSessionId}`);
+    } else {
+      console.warn(`[spawnAgentSession] ⚠️ Using runId as fallback: ${result.runId}`);
+    }
+
+    return { sessionId };
+
   } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error(`[spawnAgentSession] ❌ Failed: ${errMsg}`);
     throw error;
   }
 }
@@ -264,7 +418,7 @@ async function findOpenclawBinary(): Promise<string> {
     "/usr/local/bin/openclaw",
     "/opt/homebrew/bin/openclaw",
   ];
-  
+
   for (const candidate of candidates) {
     try {
       await fs.promises.access(candidate, fs.constants.X_OK);
@@ -272,8 +426,8 @@ async function findOpenclawBinary(): Promise<string> {
     } catch { /* skip */ }
   }
 
-  // 3. Fall back to npx
-  return "npx";
+  // 3. Fall back to npx openclaw (FIXED from v1)
+  return "npx openclaw";
 }
 
 /**
@@ -344,12 +498,18 @@ async function spawnForClaimed(
   if (!agent) throw new Error(`Agent not found: ${agentId}`);
 
   try {
-    // Get the agent configuration to determine the model and timeout
-    const model = agent.model || "default";
+    // Get the agent configuration to determine the timeout (model removed in v2.1)
     const timeoutSeconds = agent.timeoutSeconds || 1800;
 
-    // Spawn the session
-    const result = await spawnAgentSession(agentId, stepId, claim.runId!, claim.resolvedInput!, model, timeoutSeconds);
+    // Spawn the session (no model parameter, storyId added)
+    const result = await spawnAgentSession(
+      agentId,
+      stepId,
+      claim.runId!,
+      claim.resolvedInput!,
+      timeoutSeconds,  // ✅ 5. parameter (was 6.)
+      claim.storyId    // ✅ NEW: storyId parameter
+    );
     
     if (!result.sessionId) {
       throw new Error(`Failed to spawn session: ${JSON.stringify(result)}`);
