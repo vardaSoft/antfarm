@@ -94,15 +94,41 @@ export async function peekAndSpawn(
   ).get(agentId) as any;
 
   if (loopStep) {
+    // ============================================================
+    // v2.1.3: Prerequisites Verification (Hybrid Solution - C-5 Fix)
+    // ============================================================
+    // Primary: Check if all previous steps are done
+    const prereqCheck = db.prepare(`
+      SELECT COUNT(*) as cnt FROM steps
+      WHERE run_id = ?
+      AND step_index < (SELECT step_index FROM steps WHERE id = ?)
+      AND status != 'done'
+    `).get(loopStep.run_id, loopStep.id) as { cnt: number } | undefined;
+
+    if (prereqCheck && prereqCheck.cnt > 0) {
+      console.log(`[peekAndSpawn] Skipping loop step ${loopStep.id}: ${prereqCheck.cnt} prerequisites not complete`);
+      return { spawned: false, reason: "prerequisites_not_complete" };
+    }
+
     // Check if there's already a story running for this loop step
     if (loopStep.current_story_id) {
       const currentStory = db.prepare(
         "SELECT status FROM stories WHERE id = ?"
       ).get(loopStep.current_story_id) as { status: string } | undefined;
 
-      if (currentStory && currentStory.status === 'running') {
-        // A story is already running, don't claim another one
-        return { spawned: false, reason: "story_already_running" };
+      if (currentStory && (currentStory.status === 'running' || currentStory.status === 'claiming')) {
+        // A story is already running or being claimed, don't claim another one
+        return { spawned: false, reason: "story_already_claimed" };
+      } else if (currentStory && (currentStory.status === 'done' || currentStory.status === 'failed')) {
+        // Story finished - clear current_story_id for next story
+        console.log(`[peekAndSpawn] Story ${loopStep.current_story_id} completed (${currentStory.status}), clearing for next story`);
+
+        withTransaction((txDb) => {
+          txDb.prepare("UPDATE steps SET current_story_id = NULL WHERE id = ?").run(loopStep.id);
+        });
+
+        // Check again immediately after clearing (now current_story_id is NULL)
+        // Fall through to claim new story below
       }
     }
 
@@ -110,6 +136,8 @@ export async function peekAndSpawn(
     const storyClaim = claimStory(agentId, loopStep.id);
 
     if (storyClaim && storyClaim.found && storyClaim.storyId) {
+      // Apply prerequisites check to story as well (if story has prerequisites)
+      // Future: Can extend this to story-level prerequisites if stories table has dependencies
       return await spawnForClaimed(agentId, workflow, storyClaim, loopStep.id, source);
     }
   }
