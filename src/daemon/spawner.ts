@@ -1,4 +1,5 @@
 import { getDb, withTransaction } from "../db.js";
+import type { DatabaseSync } from "node:sqlite";
 import { peekStep, claimStep, claimStory } from "../installer/step-ops.js";
 import { emitEvent } from "../installer/events.js";
 import type { WorkflowSpec } from "../installer/types.js";
@@ -69,6 +70,42 @@ interface ActiveSession {
   spawned_at: string;
 }
 
+// ============================================================
+// Dependency Resolution Helper (v2.1.4)
+// ============================================================
+/**
+ * Get dependency list for a step.
+ * Currently uses step-based dependencies for backward compatibility.
+ * Future: Query YAML `depends_on` from workflow spec.
+ *
+ * Returns: Array of dependent steps with their status
+ */
+function getDependencies(db: DatabaseSync, stepId: string): Array<{ id: string; status: string; step_index: number }> {
+  const step = db.prepare("SELECT id, run_id, step_index FROM steps WHERE id = ?").get(stepId) as { id: string; run_id: string; step_index: number } | undefined;
+  
+  if (!step) {
+    console.warn(`[getDependencies] Step not found: ${stepId}`);
+    return [];
+  }
+
+  // TEMPORARILY: Use step_index for dependencies (solution 1)
+  // TODO: Switch to YAML-based `depends_on` (solution 2) when available
+  // When YAML depends_on is supported:
+  //   1. Store depends_on in steps table (from workflow spec YAML)
+  //   2. Query: SELECT id, status FROM steps WHERE id IN (SELECT unnest(depends_on))
+  //   3. No changes below in peekAndSpawn logic
+
+  const dependencies = db.prepare(`
+    SELECT id, status, step_index
+    FROM steps
+    WHERE run_id = ?
+      AND step_index < (SELECT step_index FROM steps WHERE id = ?)
+    ORDER BY step_index ASC
+  `).all(step.run_id, stepId) as Array<{ id: string; status: string; step_index: number }>;
+
+  return dependencies;
+}
+
 export async function peekAndSpawn(
   agentId: string,
   workflow: WorkflowSpec,
@@ -95,19 +132,36 @@ export async function peekAndSpawn(
 
   if (loopStep) {
     // ============================================================
-    // v2.1.3: Prerequisites Verification (Hybrid Solution - C-5 Fix)
+    // v2.1.4: Full Hybrid Prerequisites Check (C-5 fix)
     // ============================================================
-    // Primary: Check if all previous steps are done
-    const prereqCheck = db.prepare(`
-      SELECT COUNT(*) as cnt FROM steps
-      WHERE run_id = ?
-      AND step_index < (SELECT step_index FROM steps WHERE id = ?)
-      AND status != 'done'
-    `).get(loopStep.run_id, loopStep.id) as { cnt: number } | undefined;
 
-    if (prereqCheck && prereqCheck.cnt > 0) {
-      console.log(`[peekAndSpawn] Skipping loop step ${loopStep.id}: ${prereqCheck.cnt} prerequisites not complete`);
-      return { spawned: false, reason: "prerequisites_not_complete" };
+    // Get dependencies (generic, currently step_index-based)
+    const dependencies = getDependencies(db, loopStep.id);
+
+    let allDepsDone = false;
+    let skipReason = "";
+
+    if (dependencies.length === 0) {
+      // Step hat keine dependencies → Immer OK (z.B. first step in run)
+      allDepsDone = true;
+    } else {
+      // Prüfe ob alle dependencies done sind
+      allDepsDone = dependencies.every(dep => dep.status === 'done');
+
+      if (!allDepsDone) {
+        const depNames = dependencies.map(d => `${d.id}(${d.status})`).join(', ');
+
+        // Einfaches sequentielles Szenario → Klarere Nachricht
+        if (dependencies.length === 1 && dependencies[0].step_index === loopStep.step_index - 1) {
+          skipReason = `Previous step not done: ${depNames}`;
+        } else {
+          // Komplexes Szenario → Ausführliche Nachricht
+          skipReason = `Dependencies not complete: ${depNames}`;
+        }
+
+        console.log(`[peekAndSpawn] Skipping loop step ${loopStep.id}: ${skipReason}`);
+        return { spawned: false, reason: skipReason };
+      }
     }
 
     // Check if there's already a story running for this loop step
