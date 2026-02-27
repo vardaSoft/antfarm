@@ -210,3 +210,35 @@ export function nextRunNumber(): number {
 export function getDbPath(): string {
   return DB_PATH;
 }
+
+// ============================================================
+// Transaction Helper (v2.1.2) - Fix for C-3: Transaction Wrapping
+// ============================================================
+/**
+ * Wrap a database operation in a transaction.
+ * All operations are atomic (either all succeed or all rolled back).
+ *
+ * @param fn - Function to execute within the transaction
+ * @returns Result of fn() if successful
+ * @throws Error if fn() throws (transaction rolled back)
+ *
+ * Usage:
+ * const result = withTransaction((db) => {
+ *   db.prepare('INSERT INTO ...').run(...);
+ *   db.prepare('UPDATE ...').run(...);
+ *   return { success: true };
+ * });
+ */
+export function withTransaction<T>(fn: (db: DatabaseSync) => T): T {
+  const db = getDb();
+  db.exec("BEGIN IMMEDIATE");
+
+  try {
+    const result = fn(db);
+    db.exec("COMMIT");
+    return result;
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}

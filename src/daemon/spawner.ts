@@ -1,4 +1,4 @@
-import { getDb } from "../db.js";
+import { getDb, withTransaction } from "../db.js";
 import { peekStep, claimStep, claimStory } from "../installer/step-ops.js";
 import { emitEvent } from "../installer/events.js";
 import type { WorkflowSpec } from "../installer/types.js";
@@ -70,7 +70,7 @@ interface ActiveSession {
 }
 
 export async function peekAndSpawn(
-  agentId: string, 
+  agentId: string,
   workflow: WorkflowSpec,
   source: 'daemon' | 'cron' = 'daemon'
 ): Promise<SpawnResult> {
@@ -78,12 +78,12 @@ export async function peekAndSpawn(
 
   // First, try to claim a single step (this includes its own peek internally)
   const claimResult = claimStep(agentId);
-  
+
   if (claimResult.found) {
     if (!claimResult.stepId || !claimResult.runId || !claimResult.resolvedInput) {
       throw new Error("Claimed step missing required fields");
     }
-    
+
     const { stepId, runId, resolvedInput } = claimResult;
     return await spawnForClaimed(agentId, workflow, claimResult, stepId, source);
   }
@@ -99,16 +99,16 @@ export async function peekAndSpawn(
       const currentStory = db.prepare(
         "SELECT status FROM stories WHERE id = ?"
       ).get(loopStep.current_story_id) as { status: string } | undefined;
-      
+
       if (currentStory && currentStory.status === 'running') {
         // A story is already running, don't claim another one
         return { spawned: false, reason: "story_already_running" };
       }
     }
-    
+
     // Try to atomically claim a story for the running loop step
     const storyClaim = claimStory(agentId, loopStep.id);
-    
+
     if (storyClaim && storyClaim.found && storyClaim.storyId) {
       return await spawnForClaimed(agentId, workflow, storyClaim, loopStep.id, source);
     }
@@ -274,7 +274,7 @@ export async function spawnAgentSession(
 ⚠️ CRITICAL: You MUST call "step complete" or "step fail" before ending your session. If you don't, the workflow will be stuck forever. This is non-negotiable.
 
 The claimed step JSON is provided below. It contains: {"stepId": "${stepId}", "runId": "${runId}", "input": "..."}
-Save the stepId — you'll need it to report completion.
+Save the stepId - you'll need it to report completion.
 The "input" field contains your FULLY RESOLVED task instructions. Read it carefully and DO the work.
 
 Do the work described in the input. Format your output with KEY: value lines as specified.
@@ -436,15 +436,15 @@ async function findOpenclawBinary(): Promise<string> {
  */
 export function cleanupCompletedSessions(): void {
   const db = getDb();
-  
+
   // Find sessions whose steps are no longer running
   const completedSessions = db.prepare(`
-    SELECT s.agent_id, s.step_id 
+    SELECT s.agent_id, s.step_id
     FROM daemon_active_sessions s
     LEFT JOIN steps st ON s.step_id = st.id
     WHERE st.status NOT IN ('pending', 'running') OR st.status IS NULL
   `).all() as { agent_id: string; step_id: string }[];
-  
+
   // Remove completed sessions from the active sessions table
   for (const session of completedSessions) {
     db.prepare(
@@ -459,24 +459,24 @@ export function cleanupCompletedSessions(): void {
  */
 export function cleanupStaleSessions(): void {
   const db = getDb();
-  
+
   // Calculate the cutoff time (15 minutes ago)
   const cutoffTime = new Date(Date.now() - 15 * 60 * 1000).toISOString();
-  
+
   // Find stale sessions
   const staleSessions = db.prepare(`
     SELECT agent_id, step_id, story_id
-    FROM daemon_active_sessions 
+    FROM daemon_active_sessions
     WHERE spawned_at < ?
   `).all(cutoffTime) as { agent_id: string; step_id: string; story_id: string | null }[];
-  
+
   // Remove stale sessions from the active sessions table
   for (const session of staleSessions) {
     db.prepare(
       "DELETE FROM daemon_active_sessions WHERE agent_id = ? AND step_id = ? AND COALESCE(story_id, '') = COALESCE(?, '')"
     ).run(session.agent_id, session.step_id, session.story_id || '');
   }
-  
+
   if (staleSessions.length > 0) {
     console.log(`Cleaned up ${staleSessions.length} stale sessions`);
   }
@@ -485,6 +485,14 @@ export function cleanupStaleSessions(): void {
 /**
  * Spawn agent session for a claimed step or story.
  * Handles cleanup, error rollback, and session tracking.
+ */
+/**
+ * Spawn agent session for a claimed step or story.
+ * Handles cleanup, error rollback, and session tracking.
+ *
+ * v2.1.2: Added transaction wrapping for atomic database operations.
+ * The spawn itself happens asynchronously outside the transaction, but all DB state
+ * updates after spawn success are atomic. Rollback on failure is also atomic.
  */
 async function spawnForClaimed(
   agentId: string,
@@ -497,105 +505,127 @@ async function spawnForClaimed(
   const agent = workflow.agents.find((a: any) => `${workflow.id}_${a.id}` === agentId);
   if (!agent) throw new Error(`Agent not found: ${agentId}`);
 
-  try {
-    // Get the agent configuration to determine the timeout (model removed in v2.1)
-    const timeoutSeconds = agent.timeoutSeconds || 1800;
+  // Get the agent configuration to determine the timeout (model removed in v2.1)
+  const timeoutSeconds = agent.timeoutSeconds || 1800;
 
-    // Spawn the session (no model parameter, storyId added)
+  // Validate required claim parameters (v2.1.2: type safety)
+  if (!claim.runId || !claim.resolvedInput) {
+    throw new Error(`Invalid claim: missing runId or resolvedInput for agent ${agentId}`);
+  }
+
+  // Cast to validated claim for type safety
+  const validatedClaim = claim as { runId: string; resolvedInput: string; storyId?: string };
+
+  try {
+    // ============================================================
+    // SPAWN: Execute asynchronously OUTSIDE transaction (v2.1.2)
+    // ============================================================
     const result = await spawnAgentSession(
       agentId,
       stepId,
-      claim.runId!,
-      claim.resolvedInput!,
-      timeoutSeconds,  // ✅ 5. parameter (was 6.)
-      claim.storyId    // ✅ NEW: storyId parameter
+      validatedClaim.runId,
+      validatedClaim.resolvedInput,
+      timeoutSeconds,
+      validatedClaim.storyId
     );
-    
+
     if (!result.sessionId) {
       throw new Error(`Failed to spawn session: ${JSON.stringify(result)}`);
     }
 
-    // Update step/story to 'running' AFTER successful spawn
-    if (claim.storyId) {
-      // Story: claiming → running
-      db.prepare(
-        "UPDATE stories SET status = 'running', updated_at = datetime('now') WHERE id = ?"
-      ).run(claim.storyId);
+    // Validated sessionId after spawn success (v2.1.2)
+    const sessionId = result.sessionId;
 
-      // Emit story.started event (after spawn success)
-      const step = db.prepare("SELECT step_id, run_id FROM steps WHERE id = ?").get(stepId) as any;
-      const story = db.prepare("SELECT story_id, title FROM stories WHERE id = ?").get(claim.storyId) as any;
-      const wfId = getWorkflowId(step.run_id);
-      
-      emitEvent({ 
-        ts: new Date().toISOString(), 
-        event: "story.started",
-        runId: step.run_id,
-        workflowId: wfId,
-        stepId: step.step_id,
-        agentId,
-        storyId: story.story_id,
-        storyTitle: story.title
-      });
-    } else {
-      // Single step: claiming → running
-      db.prepare(
-        "UPDATE steps SET status = 'running', updated_at = datetime('now') WHERE id = ?"
-      ).run(stepId);
+    // ============================================================
+    // TRANSACTION: All DB updates after spawn success (v2.1.2)
+    // ============================================================
+    withTransaction((txDb) => {
+      // Update step/story to 'running' AFTER successful spawn
+      if (validatedClaim.storyId) {
+        // Story: claiming → running
+        txDb.prepare(
+          "UPDATE stories SET status = 'running', updated_at = datetime('now') WHERE id = ?"
+        ).run(validatedClaim.storyId);
 
-      // Emit step.running event (after spawn success)
-      const step = db.prepare("SELECT step_id, run_id FROM steps WHERE id = ?").get(stepId) as any;
-      const wfId = getWorkflowId(step.run_id);
-      
-      emitEvent({ 
-        ts: new Date().toISOString(), 
-        event: "step.running",
-        runId: step.run_id,
-        workflowId: wfId,
-        stepId: step.step_id,
-        agentId,
-        sessionId: result.sessionId
-      });
-    }
+        // Emit story.started event (after spawn success)
+        const step = txDb.prepare("SELECT step_id, run_id FROM steps WHERE id = ?").get(stepId) as any;
+        const story = txDb.prepare("SELECT story_id, title FROM stories WHERE id = ?").get(validatedClaim.storyId) as any;
+        const wfId = getWorkflowId(step.run_id);
 
-    // Record session in daemon_active_sessions
-    db.prepare(
-      `INSERT INTO daemon_active_sessions (agent_id, step_id, run_id, story_id, spawned_at, spawned_by, session_id)
-       VALUES (?, ?, ?, ?, datetime('now'), ?, ?)`
-    ).run(agentId, stepId, claim.runId!, claim.storyId || null, source, result.sessionId);
+        emitEvent({
+          ts: new Date().toISOString(),
+          event: "story.started",
+          runId: step.run_id,
+          workflowId: wfId,
+          stepId: step.step_id,
+          agentId,
+          storyId: story.story_id,
+          storyTitle: story.title
+        });
+      } else {
+        // Single step: claiming → running
+        txDb.prepare(
+          "UPDATE steps SET status = 'running', updated_at = datetime('now') WHERE id = ?"
+        ).run(stepId);
 
-    return { 
-      spawned: true, 
-      sessionId: result.sessionId,
+        // Emit step.running event (after spawn success)
+        const step = txDb.prepare("SELECT step_id, run_id FROM steps WHERE id = ?").get(stepId) as any;
+        const wfId = getWorkflowId(step.run_id);
+
+        emitEvent({
+          ts: new Date().toISOString(),
+          event: "step.running",
+          runId: step.run_id,
+          workflowId: wfId,
+          stepId: step.step_id,
+          agentId,
+          sessionId: sessionId
+        });
+      }
+
+      // Record session in daemon_active_sessions
+      txDb.prepare(
+        `INSERT INTO daemon_active_sessions (agent_id, step_id, run_id, story_id, spawned_at, spawned_by, session_id)
+         VALUES (?, ?, ?, ?, datetime('now'), ?, ?)`
+      ).run(agentId, stepId, validatedClaim.runId, validatedClaim.storyId || null, source, sessionId);
+    });
+
+    return {
+      spawned: true,
+      sessionId: sessionId,
       stepId: stepId,
-      runId: claim.runId!,
-      storyId: claim.storyId || undefined,
+      runId: validatedClaim.runId,
+      storyId: validatedClaim.storyId || undefined,
       spawnedBy: source
     };
 
   } catch (error) {
-    // Rollback on spawn failure
     console.error(`Failed to spawn session for ${agentId}: ${error}`);
-    
-    if (claim.storyId) {
-      // Revert story to 'pending'
-      db.prepare(
-        "UPDATE stories SET status = 'pending', updated_at = datetime('now') WHERE id = ? AND status = 'claiming'"
-      ).run(claim.storyId);
-      
-      // Clear step's current_story_id only if it matches the story we're rolling back
-      db.prepare(
-        "UPDATE steps SET current_story_id = NULL WHERE id = ? AND current_story_id = ?"
-      ).run(stepId, claim.storyId);
-    } else {
-      // Revert step to 'pending'
-      db.prepare(
-        "UPDATE steps SET status = 'pending', updated_at = datetime('now') WHERE id = ? AND status = 'claiming'"
-      ).run(stepId);
-    }
 
-    return { 
-      spawned: false, 
+    // ============================================================
+    // ROLLBACK TRANSACTION: Atomic rollback on failure (v2.1.2)
+    // ============================================================
+    withTransaction((txDb) => {
+      if (validatedClaim.storyId) {
+        // Revert story to 'pending'
+        txDb.prepare(
+          "UPDATE stories SET status = 'pending', updated_at = datetime('now') WHERE id = ? AND status = 'claiming'"
+        ).run(validatedClaim.storyId);
+
+        // Clear step's current_story_id only if it matches the story we're rolling back
+        txDb.prepare(
+          "UPDATE steps SET current_story_id = NULL WHERE id = ? AND current_story_id = ?"
+        ).run(stepId, validatedClaim.storyId);
+      } else {
+        // Revert step to 'pending'
+        txDb.prepare(
+          "UPDATE steps SET status = 'pending', updated_at = datetime('now') WHERE id = ? AND status = 'claiming'"
+        ).run(stepId);
+      }
+    });
+
+    return {
+      spawned: false,
       error: error instanceof Error ? error.message : String(error),
       rollback: true
     };
