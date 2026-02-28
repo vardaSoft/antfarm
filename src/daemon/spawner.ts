@@ -82,7 +82,7 @@ interface ActiveSession {
  */
 function getDependencies(db: DatabaseSync, stepId: string): Array<{ id: string; status: string; step_index: number }> {
   const step = db.prepare("SELECT id, run_id, step_index FROM steps WHERE id = ?").get(stepId) as { id: string; run_id: string; step_index: number } | undefined;
-  
+
   if (!step) {
     console.warn(`[getDependencies] Step not found: ${stepId}`);
     return [];
@@ -102,6 +102,36 @@ function getDependencies(db: DatabaseSync, stepId: string): Array<{ id: string; 
       AND step_index < (SELECT step_index FROM steps WHERE id = ?)
     ORDER BY step_index ASC
   `).all(step.run_id, stepId) as Array<{ id: string; status: string; step_index: number }>;
+
+  return dependencies;
+}
+
+// ============================================================
+// Story Dependencies (v2.1.6): Same logic as getDependencies
+// ============================================================
+/**
+ * Get dependency list for a story.
+ * Ensures sequential story execution: stories can only proceed after all previous stories are complete.
+ *
+ * Future: If YAML depends_on is supported for stories, switch to that mechanism.
+ *
+ * Returns: Array of dependent stories with their status
+ */
+function getStoryDependencies(db: DatabaseSync, storyId: string): Array<{ id: string; story_id: string; status: string; story_index: number }> {
+  const story = db.prepare("SELECT id, story_index FROM stories WHERE id = ?").get(storyId) as { id: string; story_index: number } | undefined;
+
+  if (!story) {
+    console.warn(`[getStoryDependencies] Story not found: ${storyId}`);
+    return [];
+  }
+
+  // Use story_index for sequential dependencies (same pattern as steps)
+  const dependencies = db.prepare(`
+    SELECT id, story_id, status, story_index
+    FROM stories
+    WHERE story_index < (SELECT story_index FROM stories WHERE id = ?)
+    ORDER BY story_index ASC
+  `).all(storyId) as Array<{ id: string; story_id: string; status: string; story_index: number }>;
 
   return dependencies;
 }
@@ -186,12 +216,38 @@ export async function peekAndSpawn(
       }
     }
 
+    // ============================================================
+    // v2.1.6: Check Story Dependencies BEFORE Claiming
+    // ============================================================
+    // Find the next pending story to check dependencies BEFORE claiming it
+    const nextPendingStory = db.prepare(
+      "SELECT * FROM stories WHERE step_id = ? AND status = 'pending' ORDER BY story_index LIMIT 1"
+    ).get(loopStep.id) as { id: string; story_id: string; story_index: number } | undefined;
+
+    if (nextPendingStory) {
+      // Check story dependencies (same logic as steps)
+      const storyDependencies = getStoryDependencies(db, nextPendingStory.id);
+      const allStoryDepsDone = storyDependencies.every(dep => dep.status === 'done');
+
+      if (!allStoryDepsDone) {
+        const depNames = storyDependencies.map(d => `${d.story_id}(${d.status})`).join(', ');
+
+        // Einfaches sequentielles Szenario → Klarere Nachricht
+        if (storyDependencies.length === 1 && storyDependencies[0].story_index === nextPendingStory.story_index - 1) {
+          console.log(`[peekAndSpawn] Previous story not done: ${depNames}`);
+        } else {
+          // Komplexes Szenario → Ausführliche Nachricht
+          console.log(`[peekAndSpawn] Story dependencies not complete for ${nextPendingStory.story_id}: ${depNames}`);
+        }
+
+        return { spawned: false, reason: "story_dependencies_not_complete" };
+      }
+    }
+
     // Try to atomically claim a story for the running loop step
     const storyClaim = claimStory(agentId, loopStep.id);
 
     if (storyClaim && storyClaim.found && storyClaim.storyId) {
-      // Apply prerequisites check to story as well (if story has prerequisites)
-      // Future: Can extend this to story-level prerequisites if stories table has dependencies
       return await spawnForClaimed(agentId, workflow, storyClaim, loopStep.id, source);
     }
   }
