@@ -361,7 +361,7 @@ The "input" field contains your FULLY RESOLVED task instructions. Read it carefu
 
 Do the work described in the input. Format your output with KEY: value lines as specified.
 
-MANDATORY: Report completion (do this IMMEDIATELY after finishing the work):
+MANDATORY: Report completion using tools.exec (do this IMMEDIATELY after finishing the work):
 \`\`\`
 cat <<'ANTFARM_EOF' > /tmp/antfarm-step-output.txt
 STATUS: done
