@@ -399,7 +399,21 @@ export async function spawnAgentSession(
   // 1. Generate unique identifiers
   // ========================================
   const idempotencyKey = `antfarm:${runId}:${stepId}:${storyId || 'root'}:${Math.random().toString(36).substring(7)}`;
-  const sessionKey = `agent:${agentId}:workflow:${runId}:${stepId}`;
+
+  // Get human-readable names for session key
+  const db = getDb();
+  const stepInfo = db.prepare("SELECT step_id FROM steps WHERE id = ?").get(stepId) as { step_id: string } | undefined;
+  const stepName = stepInfo?.step_id || stepId.substring(0, 8);
+
+  let entityName: string;
+  if (storyId) {
+    const storyInfo = db.prepare("SELECT story_id FROM stories WHERE id = ?").get(storyId) as { story_id: string } | undefined;
+    entityName = storyInfo?.story_id || storyId.substring(0, 8);
+  } else {
+    entityName = stepName;
+  }
+
+  const sessionKey = `agent:${agentId}:${entityName}:workflow:${runId}:${storyId || stepId}`;
 
   console.log(`[spawnAgentSession] IdempotencyKey: ${idempotencyKey}`);  // ⚠️ v2.1: NEW logging
 
