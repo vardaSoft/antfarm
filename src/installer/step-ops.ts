@@ -648,17 +648,29 @@ export function claimStory(agentId: string, stepId: string): ClaimResult | null 
 
   if (!step) return null;
 
-  // Find next pending story
-  const nextStory = db.prepare(
-    "SELECT * FROM stories WHERE run_id = ? AND status = 'pending' ORDER BY story_index LIMIT 1"
-  ).get(step.run_id) as any;
+  // Bug #3 fix: Atomic claim with dependency check
+  // Only claim a story if all previous stories are done
+  const nextStory = db.prepare(`
+    UPDATE stories
+    SET status = 'claiming', updated_at = datetime('now')
+    WHERE id = (
+      SELECT id FROM stories s1
+      WHERE s1.run_id = ?
+        AND s1.status = 'pending'
+        AND NOT EXISTS (
+          SELECT 1 FROM stories s2
+          WHERE s2.run_id = s1.run_id
+            AND s2.story_index < s1.story_index
+            AND s2.status != 'done'
+        )
+      ORDER BY s1.story_index ASC
+      LIMIT 1
+    )
+    RETURNING id, story_id, story_index, title, description, acceptance_criteria, run_id
+  `).get(step.run_id) as any;
 
+  // Return null if no pending stories or dependencies not complete
   if (!nextStory) return null;
-
-  // CHANGED: Set story to 'claiming' (not 'running')
-  db.prepare(
-    "UPDATE stories SET status = 'claiming', updated_at = datetime('now') WHERE id = ?"
-  ).run(nextStory.id);
 
   // Update step's current_story_id
   db.prepare(
