@@ -234,6 +234,17 @@ function parseAndInsertStories(output: string, runId: string): void {
       throw new Error(`STORIES_JSON has duplicate story id "${s.id}"`);
     }
     seenIds.add(s.id);
+
+    // Bug #1 fix: Check if story already exists in DB (prevent duplicates)
+    const existingStory = db.prepare(
+      "SELECT id FROM stories WHERE run_id = ? AND story_id = ?"
+    ).get(runId, s.id);
+
+    if (existingStory) {
+      console.warn(`[parseAndInsertStories] Story "${s.id}" already exists for run ${runId}, skipping insert`);
+      continue;
+    }
+
     insert.run(crypto.randomUUID(), runId, i, s.id, s.title, s.description, JSON.stringify(ac), now, now);
   }
 }

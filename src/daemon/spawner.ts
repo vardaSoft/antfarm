@@ -245,6 +245,13 @@ export async function peekAndSpawn(
       }
     }
 
+    // Bug #2 fix: Double-check loop step is actually ready before claiming stories
+    // Prevent claiming stories when implement step is transitioning states
+    if (loopStep.status !== 'running' && loopStep.status !== 'claiming') {
+      console.log(`[peekAndSpawn] Loop step ${loopStep.id} not ready (status: ${loopStep.status}), skipping story claim`);
+      return { spawned: false, reason: "loop_step_not_ready" };
+    }
+
     // Try to atomically claim a story for the running loop step
     const storyClaim = claimStory(agentId, loopStep.id);
 
