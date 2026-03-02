@@ -129,9 +129,10 @@ function getStoryDependencies(db: DatabaseSync, storyId: string): Array<{ id: st
   const dependencies = db.prepare(`
     SELECT id, story_id, status, story_index
     FROM stories
-    WHERE story_index < (SELECT story_index FROM stories WHERE id = ?)
+    WHERE run_id = (SELECT run_id FROM stories WHERE id = ?)
+      AND story_index < (SELECT story_index FROM stories WHERE id = ?)
     ORDER BY story_index ASC
-  `).all(storyId) as Array<{ id: string; story_id: string; status: string; story_index: number }>;
+  `).all(storyId, storyId) as Array<{ id: string; story_id: string; status: string; story_index: number }>;
 
   return dependencies;
 }
