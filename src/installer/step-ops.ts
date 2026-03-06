@@ -494,15 +494,19 @@ export function claimStep(agentId: string): ClaimResult {
   }
 
   // T6: Loop step claim logic
+  // OPTION B: claimStep does NOT claim stories for loop steps.
+  // Story claiming is delegated to claimStory() which has proper sequential dependency checks.
+  // This fixes the bug where stories were processed out of order.
   if (step.type === "loop") {
     const loopConfig: LoopConfig | null = step.loop_config ? JSON.parse(step.loop_config) : null;
     if (loopConfig?.over === "stories") {
-      // Find next pending story
-      const nextStory = db.prepare(
-        "SELECT * FROM stories WHERE run_id = ? AND status = 'pending' ORDER BY story_index ASC LIMIT 1"
-      ).get(step.run_id) as any | undefined;
+      // Check if there are any pending stories
+      const pendingStory = db.prepare(
+        "SELECT id FROM stories WHERE run_id = ? AND status = 'pending' LIMIT 1"
+      ).get(step.run_id) as { id: string } | undefined;
 
-      if (!nextStory) {
+      if (!pendingStory) {
+        // No pending stories - check for failures
         const failedStory = db.prepare(
           "SELECT id FROM stories WHERE run_id = ? AND status = 'failed' LIMIT 1"
         ).get(step.run_id) as { id: string } | undefined;
@@ -531,67 +535,26 @@ export function claimStep(agentId: string): ClaimResult {
         return { found: false };
       }
 
-      // CHANGED: Set story to 'claiming' (not 'running')
+      // Set step to 'running' so peekAndSpawn can find it and call claimStory
+      // claimStory has proper sequential dependency checking (story_index based)
       db.prepare(
-        "UPDATE stories SET status = 'claiming', updated_at = datetime('now') WHERE id = ?"
-      ).run(nextStory.id);
-      // Update step's current_story_id
-      db.prepare(
-        "UPDATE steps SET current_story_id = ?, updated_at = datetime('now') WHERE id = ?"
-      ).run(nextStory.id, step.id);
-
-      const wfId = getWorkflowId(step.run_id);
+        "UPDATE steps SET status = 'running', updated_at = datetime('now') WHERE id = ?"
+      ).run(step.id);
       
-      // ADDED: Emit story.claimed event (not story.started yet)
       emitEvent({ 
         ts: new Date().toISOString(), 
-        event: "story.claimed",
+        event: "step.running",
         runId: step.run_id,
-        workflowId: wfId,
+        workflowId: getWorkflowId(step.run_id),
         stepId: step.step_id,
-        agentId,
-        storyId: nextStory.story_id,
-        storyTitle: nextStory.title
+        agentId
       });
       
-      logger.info(`Story claimed: ${nextStory.story_id} — ${nextStory.title}`, { runId: step.run_id, stepId: step.step_id });
-
-      // Build story template vars
-      const story: Story = {
-        id: nextStory.id,
-        runId: nextStory.run_id,
-        storyIndex: nextStory.story_index,
-        storyId: nextStory.story_id,
-        title: nextStory.title,
-        description: nextStory.description,
-        acceptanceCriteria: JSON.parse(nextStory.acceptance_criteria),
-        status: nextStory.status,
-        output: nextStory.output ?? undefined,
-        retryCount: nextStory.retry_count,
-        maxRetries: nextStory.max_retries,
-      };
-
-      const allStories = getStories(step.run_id);
-      const pendingCount = allStories.filter(s => s.status === "pending" || s.status === "running").length;
-
-      context["current_story"] = formatStoryForTemplate(story);
-      context["current_story_id"] = story.storyId;
-      context["current_story_title"] = story.title;
-      context["completed_stories"] = formatCompletedStories(allStories);
-      context["stories_remaining"] = String(pendingCount);
-      context["progress"] = readProgressFile(step.run_id);
-
-      if (!context["verify_feedback"]) {
-        context["verify_feedback"] = "";
-      }
-
-      // Persist story context vars to DB so verify_each steps can access them
-      db.prepare("UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(context), step.run_id);
-
-      const resolvedInput = resolveTemplate(step.input_template, context);
+      logger.info(`Loop step set to running, story claiming delegated to peekAndSpawn/claimStory`, { runId: step.run_id, stepId: step.step_id });
       
-      // ADDED: Track which story was claimed
-      return { found: true, stepId: step.id, runId: step.run_id, resolvedInput, storyId: nextStory.id };
+      // Return NOT found - peekAndSpawn will handle story claiming via claimStory()
+      // which has the correct sequential dependency check
+      return { found: false };
     }
   }
 
