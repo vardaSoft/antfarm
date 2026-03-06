@@ -253,6 +253,26 @@ export async function peekAndSpawn(
       return { spawned: false, reason: "loop_step_not_ready" };
     }
 
+    // ============================================================
+    // v2.1.7: Check if verify_each is configured and Verifier is running
+    // ============================================================
+    // If verify_each is enabled, we must wait for the Verifier to complete
+    // before claiming the next story. Otherwise the Verifier gets the wrong
+    // story context (the newly claimed story instead of the completed one).
+    if (loopStep.loop_config) {
+      const loopConfig = JSON.parse(loopStep.loop_config) as { verifyEach?: boolean; verifyStep?: string };
+      if (loopConfig.verifyEach && loopConfig.verifyStep) {
+        const verifyStatus = db.prepare(
+          "SELECT status FROM steps WHERE run_id = ? AND step_id = ? LIMIT 1"
+        ).get(loopStep.run_id, loopConfig.verifyStep) as { status: string } | undefined;
+
+        if (verifyStatus && (verifyStatus.status === 'pending' || verifyStatus.status === 'running' || verifyStatus.status === 'claiming')) {
+          console.log(`[peekAndSpawn] Verifier ${loopConfig.verifyStep} is ${verifyStatus.status}, waiting before claiming next story`);
+          return { spawned: false, reason: "verifier_running" };
+        }
+      }
+    }
+
     // Try to atomically claim a story for the running loop step
     const storyClaim = claimStory(agentId, loopStep.id);
 
