@@ -221,9 +221,10 @@ export async function peekAndSpawn(
     // v2.1.6: Check Story Dependencies BEFORE Claiming
     // ============================================================
     // Find the next pending story to check dependencies BEFORE claiming it
+    // Note: stories are linked by run_id, not step_id
     const nextPendingStory = db.prepare(
-      "SELECT * FROM stories WHERE step_id = ? AND status = 'pending' ORDER BY story_index LIMIT 1"
-    ).get(loopStep.id) as { id: string; story_id: string; story_index: number } | undefined;
+      "SELECT * FROM stories WHERE run_id = ? AND status = 'pending' ORDER BY story_index LIMIT 1"
+    ).get(loopStep.run_id) as { id: string; story_id: string; story_index: number } | undefined;
 
     if (nextPendingStory) {
       // Check story dependencies (same logic as steps)
