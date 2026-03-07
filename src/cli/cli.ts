@@ -531,15 +531,15 @@ async function main() {
 
     // Find the run (support prefix match)
     // Support run number lookup in addition to UUID prefix
-    let run: { id: string; run_number: number | null; workflow_id: string; status: string } | undefined;
+    let run: { id: string; run_number: number | null; workflow_id: string; status: string; scheduler?: string } | undefined;
     if (/^\d+$/.test(target)) {
       run = db.prepare(
-        "SELECT id, run_number, workflow_id, status FROM runs WHERE run_number = ?"
+        "SELECT id, run_number, workflow_id, status, scheduler FROM runs WHERE run_number = ?"
       ).get(parseInt(target, 10)) as typeof run;
     }
     if (!run) {
       run = db.prepare(
-        "SELECT id, run_number, workflow_id, status FROM runs WHERE id = ? OR id LIKE ?"
+        "SELECT id, run_number, workflow_id, status, scheduler FROM runs WHERE id = ? OR id LIKE ?"
       ).get(target, `${target}%`) as typeof run;
     }
 
@@ -600,16 +600,30 @@ async function main() {
           "UPDATE runs SET status = 'running', updated_at = datetime('now') WHERE id = ?"
         ).run(run.id);
 
-        // Ensure crons are running for this workflow
+        // Ensure scheduler is running for this workflow based on stored preference
         const { loadWorkflowSpec } = await import("../installer/workflow-spec.js");
         const { resolveWorkflowDir } = await import("../installer/paths.js");
-        const { ensureWorkflowCrons } = await import("../installer/agent-cron.js");
-        try {
-          const workflowDir = resolveWorkflowDir(run.workflow_id);
-          const workflow = await loadWorkflowSpec(workflowDir);
-          await ensureWorkflowCrons(workflow);
-        } catch (err) {
-          process.stderr.write(`Warning: Could not start crons: ${err instanceof Error ? err.message : String(err)}\n`);
+        
+        const runScheduler = run.scheduler ?? "cron";
+        
+        if (runScheduler === "daemon") {
+          const { startDaemon, isRunning } = await import("../server/daemonctl.js");
+          if (!isRunning().running) {
+            try {
+              await startDaemon(3333);
+            } catch (err) {
+              process.stderr.write(`Warning: Could not start daemon: ${err instanceof Error ? err.message : String(err)}\n`);
+            }
+          }
+        } else {
+          const { ensureWorkflowCrons } = await import("../installer/agent-cron.js");
+          try {
+            const workflowDir = resolveWorkflowDir(run.workflow_id);
+            const workflow = await loadWorkflowSpec(workflowDir);
+            await ensureWorkflowCrons(workflow);
+          } catch (err) {
+            process.stderr.write(`Warning: Could not start crons: ${err instanceof Error ? err.message : String(err)}\n`);
+          }
         }
 
         console.log(`Resumed run ${run.id.slice(0, 8)} — reset loop step "${loopStep.id.slice(0, 8)}" to pending, verify step "${failedStep.step_id}" to waiting`);
@@ -627,16 +641,30 @@ async function main() {
       "UPDATE runs SET status = 'running', updated_at = datetime('now') WHERE id = ?"
     ).run(run.id);
 
-    // Ensure crons are running for this workflow
+    // Ensure scheduler is running for this workflow based on stored preference
     const { loadWorkflowSpec } = await import("../installer/workflow-spec.js");
     const { resolveWorkflowDir } = await import("../installer/paths.js");
-    const { ensureWorkflowCrons } = await import("../installer/agent-cron.js");
-    try {
-      const workflowDir = resolveWorkflowDir(run.workflow_id);
-      const workflow = await loadWorkflowSpec(workflowDir);
-      await ensureWorkflowCrons(workflow);
-    } catch (err) {
-      process.stderr.write(`Warning: Could not start crons: ${err instanceof Error ? err.message : String(err)}\n`);
+    
+    const runScheduler = run.scheduler ?? "cron";
+    
+    if (runScheduler === "daemon") {
+      const { startDaemon, isRunning } = await import("../server/daemonctl.js");
+      if (!isRunning().running) {
+        try {
+          await startDaemon(3333);
+        } catch (err) {
+          process.stderr.write(`Warning: Could not start daemon: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
+      }
+    } else {
+      const { ensureWorkflowCrons } = await import("../installer/agent-cron.js");
+      try {
+        const workflowDir = resolveWorkflowDir(run.workflow_id);
+        const workflow = await loadWorkflowSpec(workflowDir);
+        await ensureWorkflowCrons(workflow);
+      } catch (err) {
+        process.stderr.write(`Warning: Could not start crons: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
     }
 
     console.log(`Resumed run ${run.id.slice(0, 8)} from step "${failedStep.step_id}"`);
@@ -658,15 +686,30 @@ async function main() {
 
   if (action === "run") {
     let notifyUrl: string | undefined;
+    let scheduler: string | undefined;
     const runArgs = args.slice(3);
     const nuIdx = runArgs.indexOf("--notify-url");
     if (nuIdx !== -1) {
       notifyUrl = runArgs[nuIdx + 1];
       runArgs.splice(nuIdx, 2);
     }
+    // Parse --scheduler (default: daemon)
+    const schedulerIdx = runArgs.indexOf("--scheduler");
+    if (schedulerIdx !== -1) {
+      const schedulerValue = runArgs[schedulerIdx + 1];
+      if (schedulerValue === "cron" || schedulerValue === "daemon") {
+        scheduler = schedulerValue;
+        runArgs.splice(schedulerIdx, 2);
+      } else {
+        process.stderr.write(`Invalid scheduler value: ${schedulerValue}. Must be 'cron' or 'daemon'.\n`);
+        process.exit(1);
+      }
+    } else {
+      scheduler = "daemon"; // Default to daemon scheduler
+    }
     const taskTitle = runArgs.join(" ").trim();
     if (!taskTitle) { process.stderr.write("Missing task title.\n"); printUsage(); process.exit(1); }
-    const run = await runWorkflow({ workflowId: target, taskTitle, notifyUrl });
+    const run = await runWorkflow({ workflowId: target, taskTitle, notifyUrl, scheduler });
     process.stdout.write(
       [`Run: #${run.runNumber} (${run.id})`, `Workflow: ${run.workflowId}`, `Task: ${run.task}`, `Status: ${run.status}`].join("\n") + "\n",
     );
