@@ -5,13 +5,14 @@ import { getDb, nextRunNumber } from "../db.js";
 import { logger } from "../lib/logger.js";
 import { ensureWorkflowCrons } from "./agent-cron.js";
 import { emitEvent } from "./events.js";
+import { startDaemon, isRunning } from "../server/daemonctl.js";
 
 export async function runWorkflow(params: {
   workflowId: string;
   taskTitle: string;
   notifyUrl?: string;
   scheduler?: string;
-}): Promise<{ id: string; runNumber: number; workflowId: string; task: string; status: string; scheduler?: string }> {
+}): Promise<{ id: string; runNumber: number; workflowId: string; task: string; status: string; scheduler: string }> {
   const workflowDir = resolveWorkflowDir(params.workflowId);
   const workflow = await loadWorkflowSpec(workflowDir);
   const db = getDb();
