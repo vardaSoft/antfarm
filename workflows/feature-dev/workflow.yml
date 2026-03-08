@@ -16,7 +16,7 @@ polling:
 agents:
   - id: planner
     name: Planner
-    model: nvGLM4.7
+    model: olGLM5
     pollingModel: nvPhi3Mini4k
     role: analysis
     description: Decomposes tasks into ordered user stories.
@@ -29,7 +29,7 @@ agents:
 
   - id: setup
     name: Setup
-    model: nvQwen3Code
+    model: olQwen3CoderNext
     pollingModel: nvPhi3Mini4k
     role: coding
     description: Prepares environment, creates branch, establishes baseline.
@@ -42,7 +42,7 @@ agents:
 
   - id: developer
     name: Developer
-    model: nvQwen3Code
+    model: olQwen3CoderNext
     pollingModel: nvPhi3Mini4k
     role: coding
     description: Implements features, writes tests, creates PRs.
@@ -55,7 +55,7 @@ agents:
 
   - id: verifier
     name: Verifier
-    model: nvGLM4.7
+    model: olGLM5
     pollingModel: nvPhi3Mini4k
     role: verification
     description: Quick sanity check - did developer actually do the work?
@@ -70,7 +70,7 @@ agents:
 
   - id: tester
     name: Tester
-    model: nvGLM4.7
+    model: olGLM5
     pollingModel: nvPhi3Mini4k
     role: testing
     description: Integration and E2E testing after all stories are implemented.
@@ -83,7 +83,7 @@ agents:
 
   - id: reviewer
     name: Reviewer
-    model: nvGLM4.7
+    model: olGLM5
     pollingModel: nvPhi3Mini4k
     role: analysis
     description: Reviews PRs, requests changes or approves.
