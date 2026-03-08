@@ -720,21 +720,30 @@ export function completeStep(stepId: string, output: string): { advanced: boolea
 
   // BUG FIX #5b: Step ordering validation - verify all previous steps are done
   // (only for non-loop steps, loop steps handle their own ordering via stories)
+  // NOTE: For verifyEach flow, the implement step is 'running' while verify runs
+  // This is expected - loop steps in 'running' state don't block subsequent steps
   if (step.type !== 'loop') {
     const previousStepsIncomplete = db.prepare(
-      "SELECT step_id FROM steps WHERE run_id = ? AND step_index < ? AND status NOT IN ('done', 'waiting') LIMIT 1"
-    ).get(step.run_id, step.step_index) as { step_id: string } | undefined;
+      "SELECT step_id, type FROM steps WHERE run_id = ? AND step_index < ? LIMIT 1"
+    ).get(step.run_id, step.step_index) as { step_id: string; type: string } | undefined;
 
-    if (previousStepsIncomplete) {
-      logger.error(`Step ordering violation: step ${step.step_id} completed while previous step ${previousStepsIncomplete.step_id} is not done`, { 
-        stepId, 
-        runId: step.run_id
-      });
-      // Fail the step with clear error message
-      db.prepare(
-        "UPDATE steps SET status = 'failed', output = ?, updated_at = datetime('now') WHERE id = ?"
-      ).run(`Step ordering violation: previous step ${previousStepsIncomplete.step_id} is not done`, stepId);
-      return { advanced: false, runCompleted: false };
+    if (previousStepsIncomplete && previousStepsIncomplete.type !== 'loop') {
+      // Get the status of the previous non-loop step
+      const prevStatus = db.prepare(
+        "SELECT status FROM steps WHERE run_id = ? AND step_id = ?"
+      ).get(step.run_id, previousStepsIncomplete.step_id) as { status: string } | undefined;
+
+      if (prevStatus && !['done', 'waiting'].includes(prevStatus.status)) {
+        logger.error(`Step ordering violation: step ${step.step_id} completed while previous step ${previousStepsIncomplete.step_id} is ${prevStatus.status}`, { 
+          stepId, 
+          runId: step.run_id
+        });
+        // Fail the step with clear error message
+        db.prepare(
+          "UPDATE steps SET status = 'failed', output = ?, updated_at = datetime('now') WHERE id = ?"
+        ).run(`Step ordering violation: previous step ${previousStepsIncomplete.step_id} is ${prevStatus.status}`, stepId);
+        return { advanced: false, runCompleted: false };
+      }
     }
   }
 
