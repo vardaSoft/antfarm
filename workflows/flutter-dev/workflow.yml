@@ -25,7 +25,7 @@ agents:
     name: Planner
     model: olQwen3.5
     pollingModel: nvPhi3Mini4k
-    role: architecture
+    role: analysis
     description: |
       Senior Flutter architect. Analyzes requirements, designs Clean Architecture,
       decomposes tasks into user stories with clear acceptance criteria.
@@ -68,7 +68,7 @@ agents:
     name: Debugger
     model: olGLM5
     pollingModel: nvPhi3Mini4k
-    role: debugging
+    role: coding
     description: |
       Flutter debugging expert. Analyzes errors, finds root causes,
       fixes layout overflow, state management bugs, async issues.
@@ -113,7 +113,7 @@ agents:
     name: Reviewer
     model: nvDeepseekV3.2
     pollingModel: nvPhi3Mini4k
-    role: review
+    role: analysis
     description: |
       Senior code reviewer. Reviews PRs for code quality, architecture,
       performance, and Flutter best practices.
