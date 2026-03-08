@@ -1,4 +1,5 @@
 import { getDb } from "../db.js";
+import { migrate } from "../migrate.js";
 import { peekAndSpawn } from "./spawner.js";
 import { cleanupAbandonedSteps } from "../installer/step-ops.js";
 import { emitEvent } from "../installer/events.js";
@@ -27,6 +28,10 @@ const PID_FILE = path.join(PID_DIR, "spawner.pid");
  */
 export async function startDaemon(intervalMs: number = 30000, workflowIds?: string[]): Promise<void> {
   console.log(`Starting Antfarm daemon with ${intervalMs}ms polling interval`);
+  
+  // Run database migrations BEFORE any DB access
+  const db = getDb();
+  migrate(db);
   
   // Ensure PID directory exists
   fs.mkdirSync(PID_DIR, { recursive: true });

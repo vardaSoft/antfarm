@@ -108,6 +108,8 @@ function printUsage() {
       "antfarm spawner stop                     Stop spawner daemon",
       "antfarm spawner status                   Check spawner status",
       "",
+      "antfarm db migrate                    Run database migrations",
+      "",
       "antfarm step peek <agent-id>        Lightweight check for pending work (HAS_WORK or NO_WORK)",
       "antfarm step claim <agent-id>       Claim pending step, output resolved input as JSON",
       "antfarm step complete <step-id>      Complete step (reads output from stdin)",
@@ -413,6 +415,20 @@ async function main() {
     }
 
     printUsage();
+    process.exit(1);
+  }
+
+  if (group === "db") {
+    const sub = args[1];
+    if (sub === "migrate") {
+      const { getDb } = await import("../db.js");
+      const { migrate } = await import("../migrate.js");
+      const db = getDb();
+      migrate(db);
+      console.log("✅ Migration complete");
+      return;
+    }
+    process.stderr.write("Unknown db command. Use: antfarm db migrate\n");
     process.exit(1);
   }
 
