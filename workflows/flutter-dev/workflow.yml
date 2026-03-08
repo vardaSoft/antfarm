@@ -131,17 +131,18 @@ steps:
     agent: planner
     input: |
       You are a senior Flutter architect with 10+ years experience.
-      Focus on production-quality Clean Architecture.
+      Design the architecture for this feature.
       
       TASK:
       {{task}}
       
-      ## Your Process (follow this order):
+      ## ⚠️ CRITICAL: Think First (follow this order BEFORE creating stories)
       
       1. **Analyze Requirements**
          - Understand the full scope
          - Identify Flutter-specific concerns (state management, navigation, theming)
          - Consider platform requirements (mobile, web, desktop)
+         - Check existing codebase patterns
       
       2. **Design Architecture**
          - Choose state management (default: Riverpod)
@@ -159,18 +160,54 @@ steps:
          - State classes
          - Notifier/Controller design
       
-      5. **Create Stories**
+      5. **THEN Create Stories**
          - Order by dependency: core → features → UI
          - Each story fits one session
          - Every story has test criteria
       
-      ## Flutter-Specific Acceptance Criteria:
+      ## Architecture Requirements (always include):
+      
+      - Material 3 design
+      - Riverpod state management
+      - Clean Architecture (presentation/domain/data)
+      - Repository pattern
+      - Responsive layout
+      - Production-quality code
+      - Proper error handling
+      
+      ## Flutter-Specific Acceptance Criteria (for EVERY story):
+      
       - "flutter analyze passes with no errors"
       - "flutter test passes"
       - "Widget tests cover main functionality"
-      - "State management follows chosen pattern (Riverpod/Bloc)"
+      - "const constructors used where possible"
+      - "No unnecessary rebuilds"
+      - "Proper error and loading states"
+      
+      ## Story Structure (use this format):
+      
+      ```json
+      {
+        "story_id": "story-X-Y-Z",
+        "title": "Clear, actionable title",
+        "description": "What to implement",
+        "acceptance_criteria": [
+          "Specific, testable criterion",
+          "flutter analyze passes",
+          "flutter test passes",
+          "Widget tests exist"
+        ],
+        "files_to_create": [
+          "lib/features/.../domain/...",
+          "lib/features/.../data/...",
+          "lib/features/.../presentation/...",
+          "test/..."
+        ]
+      }
+      ```
       
       ## Output Format:
+      
       STATUS: done
       REPO: /path/to/repo
       BRANCH: feature-branch-name
@@ -236,8 +273,8 @@ steps:
       verify_step: verify
       debug_step: debug
     input: |
-      You are a senior Flutter engineer with 10+ years experience.
-      Focus on production-quality code with Clean Architecture.
+      You are a senior Flutter developer with 10+ years experience.
+      Write production-ready code suitable for a large-scale Flutter application.
       
       TASK (overall): {{task}}
       REPO: {{repo}}
@@ -257,13 +294,47 @@ steps:
       
       PROGRESS LOG: {{progress}}
       
-      ## Before Writing Code (follow this order):
-      1. Read progress-{{run_id}}.txt — especially Codebase Patterns
-      2. Analyze the story requirements
-      3. Design the architecture for this story
-      4. List widgets/components needed
-      5. Define state management approach
-      6. THEN implement code
+      ## ⚠️ CRITICAL: Think First (follow this order BEFORE writing code)
+      
+      1. **Analyze Requirements**
+         - What does this story need?
+         - What are the acceptance criteria?
+         - What dependencies exist?
+      
+      2. **Design Architecture**
+         - Which Clean Architecture layers?
+         - How does data flow?
+         - What patterns to use?
+      
+      3. **List Widgets**
+         - What screens/widgets needed?
+         - What are reusable components?
+         - What is the widget tree structure?
+      
+      4. **Define State Management**
+         - What state classes?
+         - What providers/notifiers?
+         - How to handle loading/error states?
+      
+      5. **THEN Implement Code**
+         - Start with domain layer
+         - Then data layer
+         - Then presentation layer
+      
+      ## Required Structure (Clean Architecture):
+      
+      For each feature, output files in this format:
+      
+      FILE: lib/features/{feature}/domain/entities/{entity}.dart
+      FILE: lib/features/{feature}/domain/repositories/{repository}.dart
+      FILE: lib/features/{feature}/domain/usecases/{usecase}.dart
+      FILE: lib/features/{feature}/data/models/{model}.dart
+      FILE: lib/features/{feature}/data/datasources/{datasource}.dart
+      FILE: lib/features/{feature}/data/repositories/{repository_impl}.dart
+      FILE: lib/features/{feature}/presentation/providers/{provider}.dart
+      FILE: lib/features/{feature}/presentation/screens/{screen}.dart
+      FILE: lib/features/{feature}/presentation/widgets/{widget}.dart
+      FILE: test/features/{feature}/{test_file}.dart
       
       ## Flutter Implementation Guidelines:
       
