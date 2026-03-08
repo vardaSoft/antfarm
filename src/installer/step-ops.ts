@@ -914,6 +914,30 @@ function checkLoopContinuation(runId: string, loopStepId: string): { advanced: b
     return { advanced: false, runCompleted: false };
   }
 
+  // BUG FIX #3: Check if any stories exist at all
+  // If planner failed to create stories, the loop should fail, not complete
+  const totalStories = db.prepare(
+    "SELECT COUNT(*) as cnt FROM stories WHERE run_id = ?"
+  ).get(runId) as { cnt: number } | undefined;
+
+  if (!totalStories || totalStories.cnt === 0) {
+    // No stories exist - planner step likely failed to create them
+    const loopStepInfo = db.prepare("SELECT step_id FROM steps WHERE id = ?").get(loopStepId) as { step_id: string } | undefined;
+    const stepIdForEvent = loopStepInfo?.step_id || "unknown";
+    logger.error(`Loop step has no stories - planner may have failed`, { runId });
+    db.prepare(
+      "UPDATE steps SET status = 'failed', output = ?, updated_at = datetime('now') WHERE id = ?"
+    ).run("No stories were created for this run - planner step may have failed", loopStepId);
+    db.prepare(
+      "UPDATE runs SET status = 'failed', updated_at = datetime('now') WHERE id = ?"
+    ).run(runId);
+    const wfId = getWorkflowId(runId);
+    emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId, workflowId: wfId, stepId: stepIdForEvent, detail: "No stories created - planner may have failed" });
+    emitEvent({ ts: new Date().toISOString(), event: "run.failed", runId, workflowId: wfId, detail: "No stories created - planner may have failed" });
+    scheduleRunCronTeardown(runId);
+    return { advanced: false, runCompleted: false };
+  }
+
   // All stories done — mark loop step done
   db.prepare(
     "UPDATE steps SET status = 'done', updated_at = datetime('now') WHERE id = ?"
