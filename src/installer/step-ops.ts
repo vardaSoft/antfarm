@@ -1213,6 +1213,18 @@ export function failStep(stepId: string, error: string): { retrying: boolean; ru
         // Reset loop step to running and clear current_story_id
         db.prepare("UPDATE steps SET status = 'running', current_story_id = NULL, updated_at = datetime('now') WHERE id = ?").run(retryStepInfo.id);
 
+        // Reset all downstream steps (step_index > retry_step_index) to waiting
+        const retryStepIndex = db.prepare(
+          "SELECT step_index FROM steps WHERE id = ?"
+        ).get(retryStepInfo.id) as { step_index: number } | undefined;
+
+        if (retryStepIndex) {
+          db.prepare(
+            "UPDATE steps SET status = 'waiting', updated_at = datetime('now') WHERE run_id = ? AND step_index > ?"
+          ).run(step.run_id, retryStepIndex.step_index);
+          logger.info(`Reset downstream steps to waiting for loop retry`, { runId: step.run_id, stepId: step.step_id });
+        }
+
         // Store fix story reference in context
         context["fix_story_id"] = storyId;
         db.prepare("UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(context), step.run_id);
@@ -1226,6 +1238,18 @@ export function failStep(stepId: string, error: string): { retrying: boolean; ru
         db.prepare(
           "UPDATE steps SET status = 'pending', updated_at = datetime('now') WHERE id = ?"
         ).run(retryStepInfo.id);
+
+        // Reset all downstream steps (step_index > retry_step_index) to waiting
+        const retryStepIndex = db.prepare(
+          "SELECT step_index FROM steps WHERE id = ?"
+        ).get(retryStepInfo.id) as { step_index: number } | undefined;
+
+        if (retryStepIndex) {
+          db.prepare(
+            "UPDATE steps SET status = 'waiting', updated_at = datetime('now') WHERE run_id = ? AND step_index > ?"
+          ).run(step.run_id, retryStepIndex.step_index);
+          logger.info(`Reset downstream steps to waiting for normal retry`, { runId: step.run_id, stepId: step.step_id });
+        }
 
         emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: stepId, detail: `Retrying from step ${onFail.retry_step}` });
         logger.info(`Step ${step.step_id} failed, retrying normal step ${retryStepInfo.step_id}`, { runId: step.run_id, stepId: stepId });
