@@ -974,11 +974,15 @@ function advancePipeline(runId: string): { advanced: boolean; runCompleted: bool
     "SELECT id, step_id FROM steps WHERE run_id = ? AND status = 'waiting' ORDER BY step_index ASC LIMIT 1"
   ).get(runId) as { id: string; step_id: string } | undefined;
 
-  const incomplete = db.prepare(
-    "SELECT id FROM steps WHERE run_id = ? AND status IN ('failed', 'pending', 'running') LIMIT 1"
+  // BUG FIX #4: Only block if a step is running or failed, NOT if pending
+  // Pending steps are ready to be claimed - they don't block pipeline advancement
+  // This fixes the bug where advancePipeline advanced even when plan was running
+  const blocking = db.prepare(
+    "SELECT id FROM steps WHERE run_id = ? AND status IN ('failed', 'running') LIMIT 1"
   ).get(runId) as { id: string } | undefined;
 
-  if (!next && incomplete) {
+  if (blocking) {
+    // A step is still running or has failed - don't advance the pipeline
     return { advanced: false, runCompleted: false };
   }
 
