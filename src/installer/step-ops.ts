@@ -1,5 +1,5 @@
 import { getDb } from "../db.js";
-import type { LoopConfig, Story, StoryStatus } from "./types.js";
+import type { LoopConfig, Story, StoryStatus, WorkflowSpec, WorkflowStep } from "./types.js";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -10,6 +10,43 @@ import { emitEvent } from "./events.js";
 import { logger } from "../lib/logger.js";
 import { getMaxRoleTimeoutSeconds } from "./install.js";
 import { isFrontendChange } from "../lib/frontend-detect.js";
+import YAML from "yaml";
+
+// Cache for loaded workflow specs
+const workflowSpecCache = new Map<string, WorkflowSpec>();
+
+/**
+ * Synchronously load workflow spec by workflow ID.
+ * Uses cache to avoid repeated file reads.
+ */
+function getWorkflowSpecSync(workflowId: string): WorkflowSpec | undefined {
+  if (workflowSpecCache.has(workflowId)) {
+    return workflowSpecCache.get(workflowId);
+  }
+  
+  // Find workflow directory
+  const workflowsDir = path.join(os.homedir(), ".openclaw", "antfarm", "workflows");
+  const workflowDir = path.join(workflowsDir, workflowId);
+  const filePath = path.join(workflowDir, "workflow.yml");
+  
+  try {
+    if (!fs.existsSync(filePath)) {
+      return undefined;
+    }
+    
+    const raw = fs.readFileSync(filePath, "utf-8");
+    const parsed = YAML.parse(raw) as WorkflowSpec;
+    
+    if (!parsed?.id) {
+      return undefined;
+    }
+    
+    workflowSpecCache.set(workflowId, parsed);
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Parse KEY: value lines from step output with support for multi-line values.
@@ -1069,15 +1106,22 @@ export function archiveRunProgress(runId: string): void {
 
 /**
  * Fail a step, with retry logic. For loop steps, applies per-story retry.
+ * Supports on_fail.retry_step to retry a different step (e.g., test fails → retry implement).
  */
 export function failStep(stepId: string, error: string): { retrying: boolean; runFailed: boolean } {
   const db = getDb();
 
   const step = db.prepare(
-    "SELECT run_id, retry_count, max_retries, type, current_story_id FROM steps WHERE id = ?"
-  ).get(stepId) as { run_id: string; retry_count: number; max_retries: number; type: string; current_story_id: string | null } | undefined;
+    "SELECT id, run_id, step_id, retry_count, max_retries, type, current_story_id FROM steps WHERE id = ?"
+  ).get(stepId) as { id: string; run_id: string; step_id: string; retry_count: number; max_retries: number; type: string; current_story_id: string | null } | undefined;
 
   if (!step) throw new Error(`Step not found: ${stepId}`);
+
+  // Get workflow spec to check for on_fail.retry_step
+  const wfId = getWorkflowId(step.run_id);
+  const workflow = wfId ? getWorkflowSpecSync(wfId) : undefined;
+  const stepSpec = workflow?.steps.find(s => s.id === step.step_id);
+  const onFail = stepSpec?.on_fail;
 
   // T9: Loop step failure — per-story retry
   if (step.type === "loop" && step.current_story_id) {
@@ -1093,7 +1137,6 @@ export function failStep(stepId: string, error: string): { retrying: boolean; ru
         db.prepare("UPDATE stories SET status = 'failed', retry_count = ?, updated_at = datetime('now') WHERE id = ?").run(newRetry, story.id);
         db.prepare("UPDATE steps SET status = 'failed', output = ?, current_story_id = NULL, updated_at = datetime('now') WHERE id = ?").run(error, stepId);
         db.prepare("UPDATE runs SET status = 'failed', updated_at = datetime('now') WHERE id = ?").run(step.run_id);
-        const wfId = getWorkflowId(step.run_id);
         emitEvent({ ts: new Date().toISOString(), event: "story.failed", runId: step.run_id, workflowId: wfId, stepId: stepId, storyId: storyRow?.story_id, storyTitle: storyRow?.title, detail: error });
         emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: stepId, detail: error });
         emitEvent({ ts: new Date().toISOString(), event: "run.failed", runId: step.run_id, workflowId: wfId, detail: "Story retries exhausted" });
@@ -1108,25 +1151,61 @@ export function failStep(stepId: string, error: string): { retrying: boolean; ru
     }
   }
 
-  // Single step: existing logic
+  // Single step: check retry logic
   const newRetryCount = step.retry_count + 1;
+  const maxRetries = onFail?.max_retries ?? step.max_retries ?? 2;
 
-  if (newRetryCount > step.max_retries) {
+  if (newRetryCount > maxRetries) {
+    // Retries exhausted
     db.prepare(
       "UPDATE steps SET status = 'failed', output = ?, retry_count = ?, updated_at = datetime('now') WHERE id = ?"
     ).run(error, newRetryCount, stepId);
     db.prepare(
       "UPDATE runs SET status = 'failed', updated_at = datetime('now') WHERE id = ?"
     ).run(step.run_id);
-    const wfId2 = getWorkflowId(step.run_id);
-    emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId2, stepId: stepId, detail: error });
-    emitEvent({ ts: new Date().toISOString(), event: "run.failed", runId: step.run_id, workflowId: wfId2, detail: "Step retries exhausted" });
+    emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: stepId, detail: error });
+    emitEvent({ ts: new Date().toISOString(), event: "run.failed", runId: step.run_id, workflowId: wfId, detail: "Step retries exhausted" });
     scheduleRunCronTeardown(step.run_id);
     return { retrying: false, runFailed: true };
-  } else {
-    db.prepare(
-      "UPDATE steps SET status = 'pending', retry_count = ?, updated_at = datetime('now') WHERE id = ?"
-    ).run(newRetryCount, stepId);
-    return { retrying: true, runFailed: false };
   }
+
+  // Retry logic - check for retry_step
+  if (onFail?.retry_step) {
+    // Retry a different step (e.g., test fails → retry implement)
+    const retryStep = db.prepare(
+      "SELECT id, step_id FROM steps WHERE run_id = ? AND step_id = ?"
+    ).get(step.run_id, onFail.retry_step) as { id: string; step_id: string } | undefined;
+
+    if (retryStep) {
+      // Store failure feedback in run context for the retry step
+      const run = db.prepare("SELECT context FROM runs WHERE id = ?").get(step.run_id) as { context: string };
+      const context: Record<string, string> = run.context ? JSON.parse(run.context) : {};
+      context["retry_feedback"] = error;
+      context["retry_from_step"] = step.step_id;
+      db.prepare("UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(context), step.run_id);
+
+      // Mark current step as failed (but don't fail the run)
+      db.prepare(
+        "UPDATE steps SET status = 'failed', output = ?, retry_count = ?, updated_at = datetime('now') WHERE id = ?"
+      ).run(error, newRetryCount, stepId);
+
+      // Set the retry_step to pending
+      db.prepare(
+        "UPDATE steps SET status = 'pending', updated_at = datetime('now') WHERE id = ?"
+      ).run(retryStep.id);
+
+      emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: stepId, detail: `Retrying from step ${onFail.retry_step}` });
+      logger.info(`Step ${step.step_id} failed, retrying from step ${onFail.retry_step}`, { runId: step.run_id, stepId: stepId });
+      return { retrying: true, runFailed: false };
+    } else {
+      logger.warn(`retry_step '${onFail.retry_step}' not found in run, falling back to same-step retry`, { runId: step.run_id, stepId: stepId });
+    }
+  }
+
+  // Default: retry the same step
+  db.prepare(
+    "UPDATE steps SET status = 'pending', retry_count = ?, updated_at = datetime('now') WHERE id = ?"
+  ).run(newRetryCount, stepId);
+  emitEvent({ ts: new Date().toISOString(), event: "step.timeout", runId: step.run_id, workflowId: wfId, stepId: stepId, detail: `Retry ${newRetryCount}/${maxRetries}` });
+  return { retrying: true, runFailed: false };
 }
