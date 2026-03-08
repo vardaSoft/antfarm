@@ -146,8 +146,10 @@ function migrate(db: DatabaseSync): void {
     `).get();
 
     // Check if new schema is already applied ( PRIMARY KEY includes story_id without COALESCE )
+    // Note: In composite PRIMARY KEY, pk values are 1,2,3... indicating position, not boolean
+    // So we check pk > 0 to see if a column is part of the primary key
     const tableInfo = db.prepare("PRAGMA table_info(daemon_active_sessions)").all() as Array<{ name: string; pk: number; }>;
-    const isNewSchema = tableInfo.filter(col => col.pk === 1).some(col => col.name === 'story_id');
+    const isNewSchema = tableInfo.some(col => col.name === 'story_id' && col.pk > 0);
 
     // If old index exists AND new schema not yet applied, migrate
     const isOldSchema = indexExists && !isNewSchema;
