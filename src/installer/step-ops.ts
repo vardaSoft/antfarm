@@ -1171,16 +1171,16 @@ export function failStep(stepId: string, error: string): { retrying: boolean; ru
 
   // Retry logic - check for retry_step
   if (onFail?.retry_step) {
-    // Retry a different step (e.g., test fails → retry implement)
-    const retryStep = db.prepare(
-      "SELECT id, step_id FROM steps WHERE run_id = ? AND step_id = ?"
-    ).get(step.run_id, onFail.retry_step) as { id: string; step_id: string } | undefined;
+    // Get the retry step info
+    const retryStepInfo = db.prepare(
+      "SELECT id, step_id, type FROM steps WHERE run_id = ? AND step_id = ?"
+    ).get(step.run_id, onFail.retry_step) as { id: string; step_id: string; type: string } | undefined;
 
-    if (retryStep) {
-      // Store failure feedback in run context for the retry step
+    if (retryStepInfo) {
+      // Store failure feedback in run context
       const run = db.prepare("SELECT context FROM runs WHERE id = ?").get(step.run_id) as { context: string };
       const context: Record<string, string> = run.context ? JSON.parse(run.context) : {};
-      context["retry_feedback"] = error;
+      context[`${step.step_id}_failures`] = error;
       context["retry_from_step"] = step.step_id;
       db.prepare("UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(context), step.run_id);
 
@@ -1189,14 +1189,48 @@ export function failStep(stepId: string, error: string): { retrying: boolean; ru
         "UPDATE steps SET status = 'failed', output = ?, retry_count = ?, updated_at = datetime('now') WHERE id = ?"
       ).run(error, newRetryCount, stepId);
 
-      // Set the retry_step to pending
-      db.prepare(
-        "UPDATE steps SET status = 'pending', updated_at = datetime('now') WHERE id = ?"
-      ).run(retryStep.id);
+      if (retryStepInfo.type === 'loop') {
+        // LOOP STEP: Create a "Fix Bugs" story for the loop to process
+        const storyId = `fix-bugs-${Date.now()}`;
+        const storyIndexResult = db.prepare(
+          "SELECT COALESCE(MAX(story_index), -1) + 1 as next_index FROM stories WHERE run_id = ?"
+        ).get(step.run_id) as { next_index: number };
+        const storyIndex = storyIndexResult.next_index;
 
-      emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: stepId, detail: `Retrying from step ${onFail.retry_step}` });
-      logger.info(`Step ${step.step_id} failed, retrying from step ${onFail.retry_step}`, { runId: step.run_id, stepId: stepId });
-      return { retrying: true, runFailed: false };
+        db.prepare(`
+          INSERT INTO stories (id, run_id, story_index, story_id, title, description, acceptance_criteria, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))
+        `).run(
+          crypto.randomUUID(),
+          step.run_id,
+          storyIndex,
+          storyId,
+          `Fix issues from ${step.step_id}`,
+          `Fix the following issues found during ${step.step_id}:\n\n${error.substring(0, 2000)}`,
+          JSON.stringify(["All reported issues resolved", "Tests pass", "No regressions introduced"])
+        );
+
+        // Reset loop step to running and clear current_story_id
+        db.prepare("UPDATE steps SET status = 'running', current_story_id = NULL, updated_at = datetime('now') WHERE id = ?").run(retryStepInfo.id);
+
+        // Store fix story reference in context
+        context["fix_story_id"] = storyId;
+        db.prepare("UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(context), step.run_id);
+
+        emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: stepId, detail: `Created fix story ${storyId}, retrying loop ${onFail.retry_step}` });
+        logger.info(`Created fix-bugs story ${storyId} for failed ${step.step_id}, retrying loop ${retryStepInfo.step_id}`, { runId: step.run_id, stepId: stepId });
+        return { retrying: true, runFailed: false };
+
+      } else {
+        // NORMAL STEP: Set to pending for retry
+        db.prepare(
+          "UPDATE steps SET status = 'pending', updated_at = datetime('now') WHERE id = ?"
+        ).run(retryStepInfo.id);
+
+        emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: stepId, detail: `Retrying from step ${onFail.retry_step}` });
+        logger.info(`Step ${step.step_id} failed, retrying normal step ${retryStepInfo.step_id}`, { runId: step.run_id, stepId: stepId });
+        return { retrying: true, runFailed: false };
+      }
     } else {
       logger.warn(`retry_step '${onFail.retry_step}' not found in run, falling back to same-step retry`, { runId: step.run_id, stepId: stepId });
     }
