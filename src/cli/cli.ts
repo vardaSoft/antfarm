@@ -727,7 +727,7 @@ async function main() {
 
   if (action === "run") {
     let notifyUrl: string | undefined;
-    let scheduler: "cron" | "daemon" | undefined;
+    let scheduler: "cron" | "daemon" = "daemon"; // Default to daemon
     const runArgs = args.slice(3);
     
     // Parse --notify-url
@@ -737,7 +737,7 @@ async function main() {
       runArgs.splice(nuIdx, 2);
     }
     
-    // Parse --scheduler
+    // Parse --scheduler (override default)
     const schedulerIdx = runArgs.indexOf("--scheduler");
     if (schedulerIdx !== -1) {
       const schedulerValue = runArgs[schedulerIdx + 1];
@@ -760,18 +760,14 @@ async function main() {
       `Workflow: ${run.workflowId}`,
       `Task: ${run.task}`,
       `Status: ${run.status}`,
+      `Scheduler: ${scheduler}`,
     ];
     
-    // Add scheduler information if specified
-    if (scheduler) {
-      lines.push(`Scheduler: ${scheduler}`);
-      
-      // If using daemon scheduler, show additional information
-      if (scheduler === "daemon" && run.daemonInfo) {
-        lines.push(`Daemon: Running (PID ${run.daemonInfo.pid})`);
-        if (run.daemonInfo.intervalMs) {
-          lines.push(`Interval: ${run.daemonInfo.intervalMs}ms`);
-        }
+    // If using daemon scheduler, show additional information
+    if (scheduler === "daemon" && run.daemonInfo) {
+      lines.push(`Daemon: Running (PID ${run.daemonInfo.pid})`);
+      if (run.daemonInfo.intervalMs) {
+        lines.push(`Interval: ${run.daemonInfo.intervalMs}ms`);
       }
     }
     

@@ -24,10 +24,11 @@ export async function runWorkflow(params: {
     ...workflow.context,
   };
 
+  const scheduler = params.scheduler ?? "daemon"; // Default to daemon scheduler
+
   db.exec("BEGIN");
   try {
     const notifyUrl = params.notifyUrl ?? workflow.notifications?.url ?? null;
-    const scheduler = params.scheduler ?? "cron"; // Default to cron scheduler
     const insertRun = db.prepare(
       "INSERT INTO runs (id, run_number, workflow_id, task, status, context, notify_url, scheduler, created_at, updated_at) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)"
     );
@@ -90,7 +91,7 @@ export async function runWorkflow(params: {
 
   emitEvent({ ts: new Date().toISOString(), event: "run.started", runId, workflowId: workflow.id });
 
-  logger.info(`Run started: "${params.taskTitle}" (scheduler: ${params.scheduler ?? "cron"})`, {
+  logger.info(`Run started: "${params.taskTitle}" (scheduler: ${scheduler})`, {
     workflowId: workflow.id,
     runId,
     stepId: workflow.steps[0]?.id,
@@ -101,14 +102,12 @@ export async function runWorkflow(params: {
     runNumber, 
     workflowId: workflow.id, 
     task: params.taskTitle, 
-    status: "running" 
+    status: "running",
+    scheduler
   };
   
-  if (params.scheduler) {
-    result.scheduler = params.scheduler;
-    if (daemonInfo) {
-      result.daemonInfo = daemonInfo;
-    }
+  if (daemonInfo) {
+    result.daemonInfo = daemonInfo;
   }
   
   return result;
