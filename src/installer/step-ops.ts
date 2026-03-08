@@ -707,10 +707,36 @@ export function completeStep(stepId: string, output: string): { advanced: boolea
   const db = getDb();
 
   const step = db.prepare(
-    "SELECT id, run_id, step_id, step_index, type, loop_config, current_story_id FROM steps WHERE id = ?"
-  ).get(stepId) as { id: string; run_id: string; step_id: string; step_index: number; type: string; loop_config: string | null; current_story_id: string | null } | undefined;
+    "SELECT id, run_id, step_id, step_index, type, loop_config, current_story_id, status FROM steps WHERE id = ?"
+  ).get(stepId) as { id: string; run_id: string; step_id: string; step_index: number; type: string; loop_config: string | null; current_story_id: string | null; status: string } | undefined;
 
   if (!step) throw new Error(`Step not found: ${stepId}`);
+
+  // BUG FIX #5a: Idempotency guard - don't process completions for already-done steps
+  if (step.status === 'done') {
+    logger.warn(`Step already complete, ignoring duplicate completion`, { stepId, runId: step.run_id });
+    return { advanced: false, runCompleted: false };
+  }
+
+  // BUG FIX #5b: Step ordering validation - verify all previous steps are done
+  // (only for non-loop steps, loop steps handle their own ordering via stories)
+  if (step.type !== 'loop') {
+    const previousStepsIncomplete = db.prepare(
+      "SELECT step_id FROM steps WHERE run_id = ? AND step_index < ? AND status NOT IN ('done', 'waiting') LIMIT 1"
+    ).get(step.run_id, step.step_index) as { step_id: string } | undefined;
+
+    if (previousStepsIncomplete) {
+      logger.error(`Step ordering violation: step ${step.step_id} completed while previous step ${previousStepsIncomplete.step_id} is not done`, { 
+        stepId, 
+        runId: step.run_id
+      });
+      // Fail the step with clear error message
+      db.prepare(
+        "UPDATE steps SET status = 'failed', output = ?, updated_at = datetime('now') WHERE id = ?"
+      ).run(`Step ordering violation: previous step ${previousStepsIncomplete.step_id} is not done`, stepId);
+      return { advanced: false, runCompleted: false };
+    }
+  }
 
   // Guard: don't process completions for failed runs
   const runCheck = db.prepare("SELECT status FROM runs WHERE id = ?").get(step.run_id) as { status: string } | undefined;
