@@ -1,0 +1,564 @@
+# Flutter Development Workflow
+# Optimized for Flutter/Dart development with Clean Architecture
+# Based on multi-model approach: Qwen3.5 (arch) + Qwen-Coder (code) + GLM5 (debug) + DeepSeek (review)
+
+id: flutter-dev
+name: Flutter Development Workflow
+version: 1
+description: |
+  Flutter-optimized story-based execution pipeline.
+  
+  Model Strategy:
+  - Planner (Qwen3.5): Best for architecture reasoning
+  - Developer (Qwen-Coder): Best for code generation
+  - Debugger (GLM5): Best for finding and fixing bugs
+  - Verifier (GLM5): Best for verification
+  - Tester (GLM5): Best for integration testing
+  - Reviewer (DeepSeek): Best for code review
+
+polling:
+  model: nvidia/microsoft/phi-3-mini-4k-instruct
+  timeoutSeconds: 240
+
+agents:
+  - id: planner
+    name: Planner
+    model: olQwen3.5
+    pollingModel: nvPhi3Mini4k
+    role: architecture
+    description: |
+      Senior Flutter architect. Analyzes requirements, designs Clean Architecture,
+      decomposes tasks into user stories with clear acceptance criteria.
+    workspace:
+      baseDir: agents/planner
+      files:
+        AGENTS.md: agents/planner/AGENTS.md
+        SOUL.md: agents/planner/SOUL.md
+        IDENTITY.md: agents/planner/IDENTITY.md
+
+  - id: setup
+    name: Setup
+    model: olQwen3CoderNext
+    pollingModel: nvPhi3Mini4k
+    role: coding
+    description: Prepares Flutter environment, creates branch, establishes baseline.
+    workspace:
+      baseDir: agents/setup
+      files:
+        AGENTS.md: ../../agents/shared/setup/AGENTS.md
+        SOUL.md: ../../agents/shared/setup/SOUL.md
+        IDENTITY.md: ../../agents/shared/setup/IDENTITY.md
+
+  - id: developer
+    name: Developer
+    model: olQwen3CoderNext
+    pollingModel: nvPhi3Mini4k
+    role: coding
+    description: |
+      Senior Flutter engineer. Implements features with Clean Architecture,
+      Riverpod state management, and comprehensive tests.
+    workspace:
+      baseDir: agents/developer
+      files:
+        AGENTS.md: agents/developer/AGENTS.md
+        SOUL.md: agents/developer/SOUL.md
+        IDENTITY.md: agents/developer/IDENTITY.md
+
+  - id: debugger
+    name: Debugger
+    model: olGLM5
+    pollingModel: nvPhi3Mini4k
+    role: debugging
+    description: |
+      Flutter debugging expert. Analyzes errors, finds root causes,
+      fixes layout overflow, state management bugs, async issues.
+    workspace:
+      baseDir: agents/debugger
+      files:
+        AGENTS.md: agents/debugger/AGENTS.md
+        SOUL.md: agents/debugger/SOUL.md
+        IDENTITY.md: agents/debugger/IDENTITY.md
+
+  - id: verifier
+    name: Verifier
+    model: olGLM5
+    pollingModel: nvPhi3Mini4k
+    role: verification
+    description: Quick sanity check - did developer actually do the work?
+    workspace:
+      baseDir: agents/verifier
+      skills:
+        - agent-browser
+      files:
+        AGENTS.md: ../../agents/shared/verifier/AGENTS.md
+        SOUL.md: ../../agents/shared/verifier/SOUL.md
+        IDENTITY.md: ../../agents/shared/verifier/IDENTITY.md
+
+  - id: tester
+    name: Tester
+    model: olGLM5
+    pollingModel: nvPhi3Mini4k
+    role: testing
+    description: Integration and E2E testing after all stories are implemented.
+    workspace:
+      baseDir: agents/tester
+      skills:
+        - agent-browser
+      files:
+        AGENTS.md: agents/tester/AGENTS.md
+        SOUL.md: agents/tester/SOUL.md
+        IDENTITY.md: agents/tester/IDENTITY.md
+
+  - id: reviewer
+    name: Reviewer
+    model: nvDeepseekV3.2
+    pollingModel: nvPhi3Mini4k
+    role: review
+    description: |
+      Senior code reviewer. Reviews PRs for code quality, architecture,
+      performance, and Flutter best practices.
+    workspace:
+      baseDir: agents/reviewer
+      skills:
+        - agent-browser
+      files:
+        AGENTS.md: agents/reviewer/AGENTS.md
+        SOUL.md: agents/reviewer/SOUL.md
+        IDENTITY.md: agents/reviewer/IDENTITY.md
+
+steps:
+  - id: plan
+    agent: planner
+    input: |
+      You are a senior Flutter architect with 10+ years experience.
+      Focus on production-quality Clean Architecture.
+      
+      TASK:
+      {{task}}
+      
+      ## Your Process (follow this order):
+      
+      1. **Analyze Requirements**
+         - Understand the full scope
+         - Identify Flutter-specific concerns (state management, navigation, theming)
+         - Consider platform requirements (mobile, web, desktop)
+      
+      2. **Design Architecture**
+         - Choose state management (default: Riverpod)
+         - Define layers: presentation, domain, data
+         - Plan navigation (GoRouter recommended)
+         - Consider responsive layouts
+      
+      3. **List Screens/Widgets**
+         - Break down into reusable widgets
+         - Identify shared components
+         - Plan widget tree structure
+      
+      4. **Define State Management**
+         - Provider structure
+         - State classes
+         - Notifier/Controller design
+      
+      5. **Create Stories**
+         - Order by dependency: core → features → UI
+         - Each story fits one session
+         - Every story has test criteria
+      
+      ## Flutter-Specific Acceptance Criteria:
+      - "flutter analyze passes with no errors"
+      - "flutter test passes"
+      - "Widget tests cover main functionality"
+      - "State management follows chosen pattern (Riverpod/Bloc)"
+      
+      ## Output Format:
+      STATUS: done
+      REPO: /path/to/repo
+      BRANCH: feature-branch-name
+      STACK: flutter
+      ARCHITECTURE: <brief architecture summary>
+      STATE_MANAGEMENT: Riverpod|Bloc|Provider
+      STORIES_JSON: [ ... array of story objects ... ]
+    expects: "STATUS: done"
+    max_retries: 2
+    on_fail:
+      escalate_to: human
+
+  - id: setup
+    agent: setup
+    input: |
+      You are a senior Flutter engineer.
+      Prepare the development environment for this feature.
+      
+      TASK: {{task}}
+      REPO: {{repo}}
+      BRANCH: {{branch}}
+      
+      ## Flutter Setup Process:
+      
+      1. cd into the repo
+      2. Create feature branch: git checkout -b {{branch}}
+      3. Read pubspec.yaml for dependencies
+      4. Check Flutter SDK version: flutter --version
+      5. Run: flutter pub get
+      6. Run: flutter analyze (establish baseline)
+      7. Run: flutter test (establish baseline)
+      8. Check for platform directories: android/, ios/, web/, linux/, macos/, windows/
+      
+      ## .gitignore Check:
+      Ensure Flutter-specific entries exist:
+      - .dart_tool/
+      - .flutter-plugins
+      - .flutter-plugins-dependencies
+      - build/
+      - .packages
+      
+      Reply with:
+      STATUS: done
+      STACK: flutter
+      FLUTTER_VERSION: <version>
+      BUILD_CMD: flutter build <platform>
+      TEST_CMD: flutter test
+      ANALYZE_CMD: flutter analyze
+      BASELINE: <baseline status>
+    expects: "STATUS: done"
+    max_retries: 2
+    on_fail:
+      escalate_to: human
+
+  - id: implement
+    agent: developer
+    type: loop
+    loop:
+      over: stories
+      completion: all_done
+      fresh_session: true
+      verify_each: true
+      verify_step: verify
+      debug_step: debug
+    input: |
+      You are a senior Flutter engineer with 10+ years experience.
+      Focus on production-quality code with Clean Architecture.
+      
+      TASK (overall): {{task}}
+      REPO: {{repo}}
+      BRANCH: {{branch}}
+      ARCHITECTURE: {{architecture}}
+      STATE_MANAGEMENT: {{state_management}}
+      BUILD_CMD: {{build_cmd}}
+      TEST_CMD: {{test_cmd}}
+      ANALYZE_CMD: {{analyze_cmd}}
+      
+      CURRENT STORY: {{current_story}}
+      COMPLETED STORIES: {{completed_stories}}
+      STORIES REMAINING: {{stories_remaining}}
+      
+      DEBUG FEEDBACK (if retrying): {{debug_feedback}}
+      VERIFY FEEDBACK (if retrying): {{verify_feedback}}
+      
+      PROGRESS LOG: {{progress}}
+      
+      ## Before Writing Code (follow this order):
+      1. Read progress-{{run_id}}.txt — especially Codebase Patterns
+      2. Analyze the story requirements
+      3. Design the architecture for this story
+      4. List widgets/components needed
+      5. Define state management approach
+      6. THEN implement code
+      
+      ## Flutter Implementation Guidelines:
+      
+      ### Widget Structure:
+      - Use const constructors where possible
+      - Split widgets when > 100 lines
+      - Use LayoutBuilder for responsive layouts
+      - Avoid unnecessary rebuilds
+      
+      ### State Management ({{state_management}}):
+      - Define state classes explicitly
+      - Use proper provider/notifier patterns
+      - Handle loading and error states
+      
+      ### Testing:
+      - Write widget tests for each screen
+      - Write unit tests for business logic
+      - Write integration tests for flows
+      
+      ## Pre-Commit Checklist:
+      - flutter analyze passes
+      - flutter test passes
+      - Code follows Effective Dart style
+      - No TODO comments left behind
+      
+      ## Commit:
+      git add .
+      git commit -m "feat: {{current_story_id}} - {{current_story_title}}"
+      
+      ## Update Progress:
+      Append to progress-{{run_id}}.txt:
+      - What you implemented
+      - Files changed
+      - Codebase patterns discovered
+      
+      Reply with:
+      STATUS: done
+      CHANGES: what you implemented
+      TESTS: what tests you wrote
+      FILES: list of files changed
+    expects: "STATUS: done"
+    max_retries: 2
+    on_fail:
+      retry_step: debug
+
+  - id: debug
+    agent: debugger
+    input: |
+      You are a Flutter debugging expert.
+      Analyze the error and provide a fix.
+      
+      TASK: {{task}}
+      REPO: {{repo}}
+      BRANCH: {{branch}}
+      CURRENT STORY: {{current_story}}
+      
+      ERROR LOG: {{error_log}}
+      FAILED_CODE: {{failed_code}}
+      
+      ## Your Debugging Process:
+      
+      1. **Analyze the Error**
+         - Read the stack trace
+         - Identify the root cause
+         - Check for common Flutter issues:
+           - RenderFlex overflow
+           - setState() lifecycle errors
+           - Provider scope issues
+           - Async/await problems
+           - Null safety violations
+      
+      2. **Find the Fix**
+         - Identify the problematic code
+         - Propose the correction
+         - Explain why it fixes the issue
+      
+      3. **Provide Corrected Code**
+         - Show the exact changes needed
+         - Include import statements if needed
+         - Ensure it follows Flutter best practices
+      
+      ## Common Flutter Fixes:
+      - RenderFlex overflow: Wrap in Expanded/Flexible
+      - setState() errors: Check lifecycle (initState, dispose)
+      - Provider errors: Check ProviderScope placement
+      - Null safety: Add null checks or use null-aware operators
+      
+      Reply with:
+      STATUS: done
+      ROOT_CAUSE: explanation of the bug
+      FIX: description of the fix
+      CORRECTED_CODE: |
+        <the corrected code block>
+    expects: "STATUS: done"
+    on_fail:
+      retry_step: implement
+      max_retries: 2
+      on_exhausted:
+        escalate_to: human
+
+  - id: verify
+    agent: verifier
+    input: |
+      You are a Flutter verification expert.
+      Verify the developer's work on this story.
+      
+      TASK: {{task}}
+      REPO: {{repo}}
+      BRANCH: {{branch}}
+      STACK: flutter
+      CHANGES: {{changes}}
+      TEST_CMD: {{test_cmd}}
+      ANALYZE_CMD: {{analyze_cmd}}
+      
+      CURRENT STORY: {{current_story}}
+      ACCEPTANCE_CRITERIA: {{acceptance_criteria}}
+      
+      ## Verification Checklist:
+      
+      1. **Code Exists**
+         - Not just TODOs or placeholders
+         - Proper widget structure
+         - Follows Flutter conventions
+      
+      2. **Acceptance Criteria**
+         - Each criterion is met
+         - Functionality works as expected
+      
+      3. **Tests**
+         - Widget tests exist
+         - Tests pass: flutter test
+         - Tests cover the story's functionality
+      
+      4. **Code Quality**
+         - flutter analyze passes
+         - No warnings or errors
+         - Follows Effective Dart
+      
+      5. **Visual Verification** (if UI changes)
+         Has frontend changes: {{has_frontend_changes}}
+         If true:
+         - Run: flutter run -d web (or linux/macos/windows)
+         - Use agent-browser to take screenshot
+         - Verify UI renders correctly
+         - Check for layout issues
+      
+      Reply with:
+      STATUS: done
+      VERIFIED: What you confirmed
+      
+      Or if incomplete:
+      STATUS: retry
+      ISSUES:
+      - What's missing or incomplete
+    expects: "STATUS: done"
+    on_fail:
+      retry_step: debug
+      max_retries: 2
+      on_exhausted:
+        escalate_to: human
+
+  - id: test
+    agent: tester
+    input: |
+      You are a Flutter integration testing expert.
+      Perform integration and E2E testing.
+      
+      TASK: {{task}}
+      REPO: {{repo}}
+      BRANCH: {{branch}}
+      CHANGES: {{changes}}
+      TEST_CMD: {{test_cmd}}
+      
+      ## Integration Testing Process:
+      
+      1. **Run Full Test Suite**
+         - flutter test
+         - Verify all tests pass together
+      
+      2. **Integration Checks**
+         - Look for issues between stories
+         - Check cross-feature interactions
+         - Verify state management integration
+      
+      3. **Flutter Analyze**
+         - flutter analyze
+         - No errors or warnings
+      
+      4. **E2E Testing** (if applicable)
+         - Run integration tests
+         - Use agent-browser for UI flows
+         - Verify critical user journeys
+      
+      5. **Cross-Cutting Concerns**
+         - Error handling across features
+         - Edge cases
+         - Performance considerations
+      
+      Reply with:
+      STATUS: done
+      RESULTS: What you tested and outcomes
+      
+      Or if issues found:
+      STATUS: retry
+      FAILURES:
+      - Specific test failures or bugs
+    expects: "STATUS: done"
+    on_fail:
+      retry_step: implement
+      max_retries: 2
+      on_exhausted:
+        escalate_to: human
+
+  - id: pr
+    agent: developer
+    input: |
+      Create a pull request for your changes.
+      
+      TASK: {{task}}
+      REPO: {{repo}}
+      BRANCH: {{branch}}
+      CHANGES: {{changes}}
+      RESULTS: {{results}}
+      
+      Create PR with:
+      - Clear title summarizing the change
+      - Description explaining what and why
+      - Reference to tests
+      
+      Use: gh pr create
+      
+      Reply with:
+      STATUS: done
+      PR: URL to the pull request
+    expects: "STATUS: done"
+    on_fail:
+      escalate_to: human
+
+  - id: review
+    agent: reviewer
+    input: |
+      You are a senior Flutter code reviewer with 10+ years experience.
+      Review the pull request for production readiness.
+      
+      PR: {{pr}}
+      TASK: {{task}}
+      CHANGES: {{changes}}
+      
+      ## Review Checklist:
+      
+      1. **Code Quality**
+         - Follows Effective Dart style
+         - No code smells or anti-patterns
+         - Proper separation of concerns
+      
+      2. **Architecture**
+         - Clean Architecture principles
+         - Proper state management
+         - Widget composition
+         - No unnecessary rebuilds
+      
+      3. **Performance**
+         - const constructors used
+         - No expensive operations in build()
+         - Proper state management
+         - No memory leaks (dispose controllers)
+      
+      4. **Testing**
+         - Widget tests cover main functionality
+         - Unit tests for business logic
+         - Integration tests for flows
+      
+      5. **Visual Review** (if UI changes)
+         Has frontend changes: {{has_frontend_changes}}
+         If true:
+         - Checkout branch: git checkout {{branch}}
+         - Run: flutter run -d web
+         - Use agent-browser for visual inspection
+         - Check design quality and polish
+      
+      ## Post Review:
+      Use: gh pr review <number> --approve or --request-changes
+      
+      Reply with:
+      STATUS: done
+      DECISION: approved
+      
+      Or if changes needed:
+      STATUS: retry
+      DECISION: changes_requested
+      FEEDBACK:
+      - What needs to change
+    expects: "STATUS: done"
+    on_fail:
+      retry_step: implement
+      max_retries: 3
+      on_exhausted:
+        escalate_to: human
