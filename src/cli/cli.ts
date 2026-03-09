@@ -675,7 +675,8 @@ async function main() {
         db.prepare(
           "UPDATE steps SET status = 'waiting', current_story_id = NULL, retry_count = 0, updated_at = datetime('now') WHERE id = ?"
         ).run(failedStep.id);
-        // Reset any failed stories to pending
+        // Reset only the last story (the one that failed verification) to pending
+        // Don't reset completed stories - they remain done
         db.prepare(
           "UPDATE stories SET status = 'pending', updated_at = datetime('now') WHERE run_id = ? AND status = 'failed'"
         ).run(run.id);
