@@ -889,12 +889,17 @@ function handleVerifyEachCompletion(
     "UPDATE steps SET status = 'waiting', output = ?, updated_at = datetime('now') WHERE id = ?"
   ).run(output, verifyStep.id);
 
-  if (status !== "retry") {
+  // Determine if verify passed or failed
+  // FAIL if: status === "retry" OR status is not explicitly "done"
+  // (agents must output "STATUS: done" to pass verification)
+  const verifyFailed = status === "retry" || status !== "done";
+
+  if (!verifyFailed) {
     // Verify passed
     emitEvent({ ts: new Date().toISOString(), event: "story.verified", runId: verifyStep.run_id, workflowId: getWorkflowId(verifyStep.run_id), stepId: verifyStep.step_id });
   }
 
-  if (status === "retry") {
+  if (verifyFailed) {
     // Verify failed — retry the story
     const lastDoneStory = db.prepare(
       "SELECT id, retry_count, max_retries FROM stories WHERE run_id = ? AND status = 'done' ORDER BY updated_at DESC LIMIT 1"

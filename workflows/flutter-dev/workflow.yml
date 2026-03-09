@@ -391,8 +391,8 @@ steps:
       BRANCH: {{branch}}
       CURRENT STORY: {{current_story}}
       
+      VERIFY FEEDBACK: {{verify_feedback}}
       ERROR LOG: {{error_log}}
-      FAILED_CODE: {{failed_code}}
       
       ## Your Debugging Process:
       
