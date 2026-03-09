@@ -1197,8 +1197,9 @@ export function failStep(stepId: string, error: string): { retrying: boolean; ru
           const context: Record<string, string> = run.context ? JSON.parse(run.context) : {};
           context[`${step.step_id}_failures`] = error;
           context["retry_from_step"] = step.step_id;
-          // Store as verify_feedback so debug step can access it via {{verify_feedback}}
+          // Store as both verify_feedback and error_log for debug step to access
           context["verify_feedback"] = error;
+          context["error_log"] = error;
           db.prepare("UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(context), step.run_id);
 
           if (storyRetry > storyMaxRetries) {
