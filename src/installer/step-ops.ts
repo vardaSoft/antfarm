@@ -882,7 +882,11 @@ function handleVerifyEachCompletion(
   context: Record<string, string>
 ): { advanced: boolean; runCompleted: boolean } {
   const db = getDb();
-  const status = context["status"]?.toLowerCase();
+
+  // Parse status from the verify output, not from global context
+  // (context may contain stale status from previous steps)
+  const parsedOutput = parseOutputKeyValues(output);
+  const status = parsedOutput["status"]?.toLowerCase();
 
   // Reset verify step to waiting for next use
   db.prepare(
@@ -890,9 +894,10 @@ function handleVerifyEachCompletion(
   ).run(output, verifyStep.id);
 
   // Determine if verify passed or failed
-  // FAIL if: status === "retry" OR status is not explicitly "done"
+  // PASS only if status is explicitly "done"
+  // FAIL if: status === "retry" OR status is missing/not "done"
   // (agents must output "STATUS: done" to pass verification)
-  const verifyFailed = status === "retry" || status !== "done";
+  const verifyFailed = status !== "done";
 
   if (!verifyFailed) {
     // Verify passed
@@ -901,31 +906,38 @@ function handleVerifyEachCompletion(
 
   if (verifyFailed) {
     // Verify failed — retry the story
-    const lastDoneStory = db.prepare(
-      "SELECT id, retry_count, max_retries FROM stories WHERE run_id = ? AND status = 'done' ORDER BY updated_at DESC LIMIT 1"
-    ).get(verifyStep.run_id) as { id: string; retry_count: number; max_retries: number } | undefined;
+    // Find the last story (highest story_index) - it's the one being verified
+    // It may be 'done' (just completed) or 'pending' (already retried before)
+    const lastStory = db.prepare(
+      "SELECT id, story_id, retry_count, max_retries, status FROM stories WHERE run_id = ? ORDER BY story_index DESC LIMIT 1"
+    ).get(verifyStep.run_id) as { id: string; story_id: string; retry_count: number; max_retries: number; status: string } | undefined;
 
-    if (lastDoneStory) {
-      const newRetry = lastDoneStory.retry_count + 1;
-      if (newRetry > lastDoneStory.max_retries) {
+    if (lastStory) {
+      // If story is done, increment retry count (first failure)
+      // If story is pending, it was already retried - use current retry_count
+      const newRetry = lastStory.status === 'done' 
+        ? lastStory.retry_count + 1 
+        : lastStory.retry_count;
+
+      if (newRetry > lastStory.max_retries) {
         // Story retries exhausted — fail everything
-        db.prepare("UPDATE stories SET status = 'failed', retry_count = ?, updated_at = datetime('now') WHERE id = ?").run(newRetry, lastDoneStory.id);
+        db.prepare("UPDATE stories SET status = 'failed', retry_count = ?, updated_at = datetime('now') WHERE id = ?").run(newRetry, lastStory.id);
         db.prepare("UPDATE steps SET status = 'failed', updated_at = datetime('now') WHERE id = ?").run(loopStepId);
         db.prepare("UPDATE runs SET status = 'failed', updated_at = datetime('now') WHERE id = ?").run(verifyStep.run_id);
         const wfId = getWorkflowId(verifyStep.run_id);
-        emitEvent({ ts: new Date().toISOString(), event: "story.failed", runId: verifyStep.run_id, workflowId: wfId, stepId: verifyStep.step_id });
+        emitEvent({ ts: new Date().toISOString(), event: "story.failed", runId: verifyStep.run_id, workflowId: wfId, stepId: verifyStep.step_id, storyId: lastStory.story_id });
         emitEvent({ ts: new Date().toISOString(), event: "run.failed", runId: verifyStep.run_id, workflowId: wfId, detail: "Verification retries exhausted" });
         scheduleRunCronTeardown(verifyStep.run_id);
         return { advanced: false, runCompleted: false };
       }
 
       // Set story back to pending for retry
-      db.prepare("UPDATE stories SET status = 'pending', retry_count = ?, updated_at = datetime('now') WHERE id = ?").run(newRetry, lastDoneStory.id);
+      db.prepare("UPDATE stories SET status = 'pending', retry_count = ?, updated_at = datetime('now') WHERE id = ?").run(newRetry, lastStory.id);
 
-      // Store verify feedback
-      const issues = context["issues"] ?? output;
+      // Store verify feedback (from parsed output, not global context)
+      const issues = parsedOutput["issues"] ?? output;
       context["verify_feedback"] = issues;
-      emitEvent({ ts: new Date().toISOString(), event: "story.retry", runId: verifyStep.run_id, workflowId: getWorkflowId(verifyStep.run_id), stepId: verifyStep.step_id, detail: issues });
+      emitEvent({ ts: new Date().toISOString(), event: "story.retry", runId: verifyStep.run_id, workflowId: getWorkflowId(verifyStep.run_id), stepId: verifyStep.step_id, storyId: lastStory.story_id, detail: issues });
       db.prepare("UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(context), verifyStep.run_id);
     }
 
@@ -1185,6 +1197,8 @@ export function failStep(stepId: string, error: string): { retrying: boolean; ru
           const context: Record<string, string> = run.context ? JSON.parse(run.context) : {};
           context[`${step.step_id}_failures`] = error;
           context["retry_from_step"] = step.step_id;
+          // Store as verify_feedback so debug step can access it via {{verify_feedback}}
+          context["verify_feedback"] = error;
           db.prepare("UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(context), step.run_id);
 
           if (storyRetry > storyMaxRetries) {
