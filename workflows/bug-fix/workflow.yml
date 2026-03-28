@@ -15,7 +15,7 @@ polling:
 agents:
   - id: triager
     name: Triager
-    model: nvGLM4.7
+    model: olGLM5
     pollingModel: nvPhi3Mini4k
     role: analysis
     description: Analyzes bug reports, reproduces issues, classifies severity.
@@ -28,7 +28,7 @@ agents:
 
   - id: investigator
     name: Investigator
-    model: nvGLM4.7
+    model: olGLM5
     pollingModel: nvPhi3Mini4k
     role: analysis
     description: Traces bugs to root cause and proposes fix approach.
@@ -41,7 +41,7 @@ agents:
 
   - id: setup
     name: Setup
-    model: nvQwen3Code
+    model: olQwen3CoderNext
     pollingModel: nvPhi3Mini4k
     role: coding
     description: Creates bugfix branch and establishes baseline.
@@ -54,7 +54,7 @@ agents:
 
   - id: fixer
     name: Fixer
-    model: nvQwen3Code
+    model: olQwen3CoderNext
     pollingModel: nvPhi3Mini4k
     role: coding
     description: Implements the fix and writes regression tests.
@@ -67,7 +67,7 @@ agents:
 
   - id: verifier
     name: Verifier
-    model: nvGLM4.7
+    model: olGLM5
     pollingModel: nvPhi3Mini4k
     role: verification
     description: Verifies the fix and regression test correctness.
@@ -80,7 +80,7 @@ agents:
 
   - id: pr
     name: PR Creator
-    model: nvGLM4.7
+    model: olGLM5
     pollingModel: nvPhi3Mini4k
     role: pr
     description: Creates a pull request with bug fix details.

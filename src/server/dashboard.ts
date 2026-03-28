@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getDb } from "../db.js";
+import { migrate } from "../migrate.js";
 import { resolveBundledWorkflowsDir } from "../installer/paths.js";
 import YAML from "yaml";
 
@@ -71,6 +72,10 @@ function serveHTML(res: http.ServerResponse) {
 }
 
 export function startDashboard(port = 3333): http.Server {
+  // Run database migrations BEFORE starting server
+  const db = getDb();
+  migrate(db);
+  
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", `http://localhost:${port}`);
     const p = url.pathname;

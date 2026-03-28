@@ -15,7 +15,7 @@ polling:
 agents:
   - id: scanner
     name: Scanner
-    model: nvQwen3Code
+    model: olQwen3CoderNext
     pollingModel: nvPhi3Mini4k
     role: scanning
     description: Explores codebase and runs comprehensive security analysis.
@@ -28,7 +28,7 @@ agents:
 
   - id: prioritizer
     name: Prioritizer
-    model: nvGLM4.7
+    model: olGLM5
     pollingModel: nvPhi3Mini4k
     role: analysis
     description: Deduplicates, ranks, and groups findings into a fix plan.
@@ -41,7 +41,7 @@ agents:
 
   - id: setup
     name: Setup
-    model: nvQwen3Code
+    model: olQwen3CoderNext
     pollingModel: nvPhi3Mini4k
     role: coding
     description: Creates security branch and establishes baseline.
@@ -54,7 +54,7 @@ agents:
 
   - id: fixer
     name: Fixer
-    model: nvQwen3Code
+    model: olQwen3CoderNext
     pollingModel: nvPhi3Mini4k
     role: coding
     description: Implements security fixes one at a time with regression tests.
@@ -67,7 +67,7 @@ agents:
 
   - id: verifier
     name: Verifier
-    model: nvGLM4.7
+    model: olGLM5
     pollingModel: nvPhi3Mini4k
     role: verification
     description: Verifies each fix is correct and the vulnerability is patched.
@@ -80,7 +80,7 @@ agents:
 
   - id: tester
     name: Tester
-    model: nvGLM4.7
+    model: olGLM5
     pollingModel: nvPhi3Mini4k
     role: testing
     description: Final integration testing and audit re-run after all fixes.
@@ -93,7 +93,7 @@ agents:
 
   - id: pr
     name: PR Creator
-    model: nvGLM4.7
+    model: olGLM5
     pollingModel: nvPhi3Mini4k
     role: pr
     description: Creates a pull request summarizing the security audit and fixes.

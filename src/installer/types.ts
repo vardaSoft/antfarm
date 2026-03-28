@@ -58,6 +58,9 @@ export type WorkflowStep = {
   on_fail?: WorkflowStepFailure;
 };
 
+export type StepStatus = "pending" | "claiming" | "running" | "done" | "failed";
+export type StoryStatus = "pending" | "claiming" | "running" | "done" | "failed";
+
 export type Story = {
   id: string;
   runId: string;
@@ -66,7 +69,7 @@ export type Story = {
   title: string;
   description: string;
   acceptanceCriteria: string[];
-  status: "pending" | "running" | "done" | "failed";
+  status: StoryStatus;
   output?: string;
   retryCount: number;
   maxRetries: number;
